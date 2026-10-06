@@ -150,7 +150,7 @@ The injector picks the MV3 or MV2 API under the hood. In MV3 it calls `chrome.sc
 
 ## A4. `web_accessible_resources`
 
-**Platform fact:** By default, web pages cannot load files from an extension's package. `web_accessible_resources` lists the files that web pages are allowed to load, for example as an iframe `src` or a script `src`. The MV3 format also lets you restrict which sites may load them and set `use_dynamic_url`.
+**Platform fact:** By default, web pages cannot load files from an extension's package. `web_accessible_resources` lists the files that web pages are allowed to load, for example as an iframe `src` or a script `src`. In MV3, each entry also says which sites (`matches`) may load the resources, and it can set `use_dynamic_url`.
 
 **In the repo** (MV3, abridged; `apps/browser/src/manifest.v3.json`):
 
@@ -158,6 +158,7 @@ The injector picks the MV3 or MV2 API under the hood. In MV3 it calls `chrome.sc
       "resources": [
         "content/fido2-page-script.js",
         "notification/bar.html",
+        ...
         "overlay/menu-button.html",
         "overlay/menu-list.html",
         "overlay/menu.html",
@@ -171,7 +172,7 @@ Why this matters for injected iframes: the inline menu (`overlay/menu.html`, `ov
 
 `content/fido2-page-script.js` is listed because MV2 builds inject it into the page as a `<script src=...>`, see the MAIN-world discussion in A7.
 
-`use_dynamic_url` is a Chrome MV3 option. As I understand Chrome's documentation, it makes the resources load from a session-specific URL; the repo only sets the flag, and I did not find code that depends on its details, so treat that description as general knowledge rather than something proven here. The repo does show that predictable extension URLs are a known concern: a custom ESLint rule, `libs/eslint/platform/no-page-script-url-leakage.mjs`, flags script elements that receive `chrome.runtime.getURL()` results, because "This pattern exposes predictable extension URLs to web pages, enabling fingerprinting attacks" (its file header) and tells developers to "Use secure page script registration instead". That is consistent with the MV3 FIDO2 path registering the page script with `world: "MAIN"` instead of inserting a `<script src>`; the MV2 helper that still inserts one carries an `eslint-disable-next-line` for this rule (A7).
+**Platform fact:** `use_dynamic_url` is a Chrome MV3 option. Chrome documents it as allowing the resources to be loaded only through a dynamic ID, which is regenerated each browser session or extension reload, instead of the extension's fixed ID. Its purpose is to make it harder for a page to detect or fingerprint the extension by probing its fixed URLs. It does not stop a page that already knows the current URL from loading the resource. The repo only sets the flag, and no code depends on how it works. Firefox already gives each installation a random `moz-extension://` UUID. The repo does show that predictable extension URLs are a known concern: a custom ESLint rule, `libs/eslint/platform/no-page-script-url-leakage.mjs`, flags script elements that receive `chrome.runtime.getURL()` results, because "This pattern exposes predictable extension URLs to web pages, enabling fingerprinting attacks" (its file header) and tells developers to "Use secure page script registration instead". That is consistent with the MV3 FIDO2 path registering the page script with `world: "MAIN"` instead of inserting a `<script src>`; the MV2 helper that still inserts one carries an `eslint-disable-next-line` for this rule (A7).
 
 ## A5. Content Security Policy (CSP) and sandboxed pages
 
@@ -184,7 +185,7 @@ Why this matters for injected iframes: the inline menu (`overlay/menu.html`, `ov
     "__chrome__sandbox": "sandbox allow-scripts; script-src 'self'"
 ```
 
-(`apps/browser/src/manifest.v3.json`, `content_security_policy`.) The MV2 manifest uses the string form for `content_security_policy` and a separate `sandbox` object with its own CSP. The `wasm-unsafe-eval` allowance is consistent with the extension loading the Rust SDK as WebAssembly (`apps/browser/src/platform/services/sdk/browser-sdk-load.service.ts` imports `./wasm`), though I am inferring the reason rather than reading it from a comment.
+(`apps/browser/src/manifest.v3.json`, `content_security_policy`. Because of the `__chrome__` prefix, only Chrome builds get the `sandbox` CSP key here.) The MV2 manifest uses the string form for `content_security_policy` and a separate `sandbox` object with its own CSP. The `wasm-unsafe-eval` allowance is consistent with the extension loading the Rust SDK as WebAssembly (`apps/browser/src/platform/services/sdk/browser-sdk-load.service.ts` imports `./wasm`), though I am inferring the reason rather than reading it from a comment.
 
 **Sandboxed pages.** Both manifests list:
 
@@ -194,7 +195,7 @@ Why this matters for injected iframes: the inline menu (`overlay/menu.html`, `ov
   },
 ```
 
-Platform fact: a manifest "sandbox page" runs with an opaque origin and without access to extension APIs. In Firefox builds, `"__firefox__sandbox": null` removes this key. The code also puts the same pages inside an iframe with the HTML attribute `sandbox="allow-scripts"` (see C4), which independently gives the iframe an opaque origin. So the actual button and list UI run in a context that cannot call `chrome.*` and must talk through a parent extension page.
+**Platform fact:** a manifest "sandbox page" (a Chrome feature) is served in a unique opaque origin and has no access to extension APIs. In Firefox builds, `"__firefox__sandbox": null` removes this key. The code also loads the same pages in an iframe with the HTML attribute `sandbox="allow-scripts"` (see C4). That attribute gives the iframe an opaque origin on its own, in every browser. So the actual button and list UI run in a context that cannot call `chrome.*` and must communicate through their parent extension page.
 
 ## A6. Execution contexts
 
@@ -203,7 +204,7 @@ Different parts of the extension run in different JavaScript environments. Knowi
 | Context | What it is | In the repo |
 | --- | --- | --- |
 | Background page (MV2) | A hidden persistent page with a DOM | `apps/browser/src/platform/background.html` (MV2 build only), built by `HtmlWebpackPlugin` in `apps/browser/webpack.base.js` |
-| Service worker (MV3) | Background code with no DOM, which the browser may stop when idle and restart on events | `background.js`, same entry source as MV2 (`apps/browser/src/platform/background.ts`) |
+| Service worker (MV3, Chromium and Safari) | Background code with no DOM, which the browser may stop when idle and restart on events. Firefox MV3 builds use a non-persistent background script instead (A1) | `background.js`, same entry source as MV2 (`apps/browser/src/platform/background.ts`) |
 | Offscreen document (MV3, not Firefox) | A hidden page created on demand so the service worker can use DOM-only APIs | `apps/browser/src/platform/offscreen-document/` |
 | Popup | The toolbar UI (Angular app) | `apps/browser/src/popup/` |
 | Popout window, sidebar, side panel | The same Angular app opened in other containers | `uilocation` query param, `BrowserPopupUtils` |
@@ -223,13 +224,13 @@ bitwardenMain.bootstrap().catch((error) => logService.error(error));
 
 (`apps/browser/src/platform/background.ts`.) `MainBackground` (`apps/browser/src/background/main.background.ts`) constructs every background service by hand; see [B2](#b2-angular-in-the-popup-and-manual-construction-in-the-background).
 
-The lifecycle design doc states the consequence directly: "Firefox runs Manifest V2 with a persistent background page; Chrome runs Manifest V3, whose background is a service worker the browser terminates and restarts at will. In-memory background state is therefore durable on Firefox but ephemeral on Chrome, where it must be reconstructed on each restart." (`apps/browser/src/autofill/lifecycle.design.md`.) And `apps/browser/CLAUDE.md` says: "DON'T assume background page persists indefinitely" and "`chrome.extension.getBackgroundPage()` returns `null` in MV3".
+The lifecycle design doc states the consequence directly: "Firefox runs Manifest V2 with a persistent background page; Chrome runs Manifest V3, whose background is a service worker the browser terminates and restarts at will. In-memory background state is therefore durable on Firefox but ephemeral on Chrome, where it must be reconstructed on each restart." (`apps/browser/src/autofill/lifecycle.design.md`.) This describes the production builds (A1). The not-for-production Firefox MV3 build would not get that durability, because a Firefox MV3 background script can be unloaded when idle. And `apps/browser/CLAUDE.md` says: "DON'T assume background page persists indefinitely" and "`chrome.extension.getBackgroundPage()` returns `null` in MV3".
 
 What follows for you as a reader:
 
 - **No DOM** in the service worker. Anything needing `localStorage`, `document`, or clipboard DOM tricks needs a different home (the offscreen document).
 - **No durable memory.** Memory state must be persisted somewhere that survives a worker restart (see [B3](#b3-rxjs-and-the-state-provider-framework)).
-- **Timers are unreliable.** `setInterval` in a worker that gets terminated is lost, so the repo has a task scheduler built on `chrome.alarms` (for delays of a minute or more; shorter ones use plain timers per the class comment) in `apps/browser/src/platform/services/task-scheduler/browser-task-scheduler.service.ts`, used by `VaultTimeoutService` (`libs/common/src/key-management/vault-timeout/services/vault-timeout.service.ts`).
+- **Timers are unreliable.** `setInterval` in a worker that gets terminated is lost, so the repo has a task scheduler built on `chrome.alarms` in `apps/browser/src/platform/services/task-scheduler/browser-task-scheduler.service.ts`. The alarms API cannot schedule anything shorter than a minute. Per the class comments, delays under a minute use plain `setTimeout`/`setInterval`, with alarms created as a backup in case the timer is lost. `VaultTimeoutService` (`libs/common/src/key-management/vault-timeout/services/vault-timeout.service.ts`) uses this scheduler.
 - **Startup order matters.** In `main.background.ts`, `bootstrap()` has a comment that the autofill lifecycle is wired "before runtime init triggers script injection, so the onConnect listener is registered before any frame connects".
 
 ### The offscreen document
@@ -248,7 +249,7 @@ What follows for you as a reader:
   };
 ```
 
-So it exists for two reasons: **clipboard access** (copy and read, via `BrowserClipboardService` in `apps/browser/src/platform/services/browser-clipboard.service.ts`) and **`window.localStorage`** (the MV3 background wraps it in `OffscreenStorageService`, `apps/browser/src/platform/storage/offscreen-storage.service.ts`). `DefaultOffscreenDocumentService.withDocument` (`apps/browser/src/platform/offscreen-document/offscreen-document.service.ts`) creates the document if missing, runs a callback, and closes the document when the last caller finishes (a reference count in `workerCount`). `MainBackground` picks the storage backend by manifest version:
+So it exists for two reasons. The first is **clipboard access**. Inside the offscreen page, the copy and read handlers call `BrowserClipboardService` (`apps/browser/src/platform/services/browser-clipboard.service.ts`). The background decides when to use the offscreen page in `BrowserPlatformUtilsService.copyToClipboard` / `readFromClipboard` (`apps/browser/src/platform/services/platform-utils/browser-platform-utils.service.ts`). Safari always goes through the native app (`SafariApp.sendMessageToApp("copyToClipboard", ...)`). Otherwise the offscreen page is used only when the build is MV3, `chrome.offscreen` exists (`offscreenApiSupported()`), and the caller has no `document`, as in the service worker. A caller with a document, such as the popup, uses the clipboard directly. The second reason is **`window.localStorage`**: the MV3 background wraps it in `OffscreenStorageService` (`apps/browser/src/platform/storage/offscreen-storage.service.ts`). `DefaultOffscreenDocumentService.withDocument` (`apps/browser/src/platform/offscreen-document/offscreen-document.service.ts`) creates the document if missing, runs a callback, and closes the document when the last caller finishes (a reference count in `workerCount`). `MainBackground` picks the storage backend by manifest version:
 
 ```ts
     const localStorageStorageService = BrowserApi.isManifestVersion(3)
@@ -283,21 +284,23 @@ These run on web pages and are the main subject of Part C. Two important facts:
 
 ## A7. Isolated worlds vs the page's main world
 
-**Platform fact:** A content script shares the page's DOM but runs in its own *isolated world*, a separate JavaScript environment. The page's scripts cannot read the content script's variables or call its functions, and the content script cannot see the page's JavaScript variables. Both see the same DOM tree and can change it. The page can also change the DOM after the content script reads it, and the content script can only read what the DOM exposes (for example, attribute values that the page controls). Only the content script (not the page) can call extension APIs such as `chrome.runtime.sendMessage`, and even the content script gets a limited subset of them.
+**Platform fact:** A content script shares the page's DOM but runs in its own *isolated world*, a separate JavaScript environment with its own globals and its own copies of built-in objects and prototypes. The page's scripts cannot read the content script's variables or call its functions, and the content script cannot see the page's JavaScript variables. Because the built-ins are separate, a page that monkey-patches something like `Element.prototype.attachShadow` or `JSON.parse` does not affect the content script. Both worlds see the same DOM tree and can change it. The page can also change the DOM after the content script reads it, and the content script can only read what the DOM exposes, for example attribute values that the page controls. Of the two, only the content script can use extension messaging such as `chrome.runtime.sendMessage`, and even it gets only a limited subset of extension APIs. A web page can message an extension only if the extension declares `externally_connectable`, and Bitwarden does not (Part D).
 
 **What a malicious page can and cannot do:**
 
 | The page can | The page cannot (by default isolation) |
 | --- | --- |
-| Read and rewrite any DOM node the extension adds to the page, unless that node is protected by a closed shadow root or a cross-origin iframe boundary | Read the content script's JS variables (such as `bitwardenAutofillInit`) or call its functions |
+| Read and rewrite any DOM node the extension adds to the page. A closed shadow root hides the node's *contents* from page script, and a cross-origin iframe hides its document, but the page can still move, restyle, cover, or remove the host element itself | Read the content script's JS variables (such as `bitwardenAutofillInit`) or call its functions |
 | Change CSS, attributes, `opacity`, `z-index`, and `pointer-events` on its own elements (and on the extension's host elements; see [C4](#c4-the-inline-menu-overlay)) | Call `chrome.runtime.*` as the extension |
-| Dispatch synthetic events and `window.postMessage` | Produce an event with `isTrusted === true` |
+| Dispatch synthetic events, and call `window.postMessage` (the resulting `message` events are dispatched by the browser, so they are `isTrusted === true`) | Synthesize an input event (click, key) with `isTrusted === true`. It can, however, trick the user into producing a real one (clickjacking) |
 | Observe values that autofill writes into form fields (after the fill, the data is in the page's DOM) | Read extension-origin iframe contents (cross-origin) |
 
 In the repo, you can see this boundary being exploited as a design tool:
 
 - `windowContext.bitwardenAutofillInit` is stored on the content script's own `window` (`apps/browser/src/autofill/content/bootstrap-autofill-overlay.ts`), which the page cannot see, so the page cannot re-enter the content script through that handle.
-- `EventSecurity.isEventTrusted(event)` (`apps/browser/src/autofill/utils/event-security.ts`) is just `event.isTrusted`. Platform fact: events generated by script have `isTrusted === false`. The code rejects synthetic events in many places, for example the inline-menu cipher click handler (`apps/browser/src/autofill/overlay/inline-menu/pages/list/autofill-inline-menu-list.ts`), the submit-button handler in `autofill-overlay-content.service.ts`, and the window-message handler in `content-message-handler.ts`.
+- `EventSecurity.isEventTrusted(event)` (`apps/browser/src/autofill/utils/event-security.ts`) is just `event.isTrusted`. **Platform fact:** events created and dispatched by script (`dispatchEvent`, `element.click()`) have `isTrusted === false`. Events the browser dispatches itself have `isTrusted === true`, including real user input and the `message` event produced by any `window.postMessage` call. The code rejects synthetic events in many places, for example the inline-menu cipher click handler (`apps/browser/src/autofill/overlay/inline-menu/pages/list/autofill-inline-menu-list.ts`) and the submit-button handler in `autofill-overlay-content.service.ts`. Two limits matter here:
+  - On user input, `isTrusted` proves that a real click or keypress happened. It does not prove the user saw what they clicked, which is why clickjacking defenses (A10) are also needed.
+  - On `message` events, such as in `content-message-handler.ts` and the FIDO2 messenger, the check only blocks a hand-built `new MessageEvent(...)`. A page calling `window.postMessage` still passes, so the source and origin checks are what actually filter those messages.
 - The FIDO2 content script comments that its Permissions Policy check "runs in the content script's isolated world, so its view of `document.permissionsPolicy` / `document.featurePolicy` cannot be tampered with by page-world script" (`apps/browser/src/autofill/fido2/content/fido2-content-script.ts`).
 - Values the page controls are treated as untrusted data. The FIDO2 types are named accordingly:
 
@@ -312,7 +315,7 @@ export type InsecureCreateCredentialParams = Omit<
 
 ### The one script that deliberately runs in the MAIN world
 
-WebAuthn passkeys require overriding `navigator.credentials.create/get` in the page's own world, so Bitwarden must run a script there. In MV3 it registers the page script with `world: "MAIN"` and the companion content script in the default isolated world:
+To offer its own passkeys, Bitwarden overrides `navigator.credentials.create/get`, and that override must live in the page's own world, so Bitwarden must run a script there. In MV3 it registers the page script with `world: "MAIN"` and the companion content script in the default isolated world (for already-open tabs it also injects with `chrome.scripting.ExecutionWorld.MAIN`):
 
 ```ts
         {
@@ -325,7 +328,7 @@ WebAuthn passkeys require overriding `navigator.credentials.create/get` in the p
 
 (`apps/browser/src/autofill/fido2/background/fido2.background.ts`, `updateMv3ContentScriptsRegistration`.) In MV2 there is no `world` option, so `apps/browser/src/autofill/fido2/content/fido2-page-script-delay-append.mv2.ts` creates a `<script>` element whose `src` is `chrome.runtime.getURL("content/fido2-page-script.js")` and prepends it to the page. This is also why that file is in `web_accessible_resources`.
 
-The page script and the content script talk through `window.postMessage` plus a per-request `MessageChannel` (`apps/browser/src/autofill/fido2/content/messaging/messenger.ts`). The receiver rejects opaque-origin (sandboxed) contexts, untrusted events, a mismatched `event.origin`, and messages without a transferred port. Because the page script lives in the page's world, **anything it holds is visible to the page**. The repo treats it as a hostile environment, and the page script even removes its own `<script>` element after loading (`fido2-page-script.ts`).
+The page script and the content script talk through `window.postMessage` plus a per-request `MessageChannel` (`apps/browser/src/autofill/fido2/content/messaging/messenger.ts`). The receiver rejects opaque-origin (sandboxed) contexts, untrusted events, a mismatched `event.origin`, and messages without a transferred port. Because the page script and the page share a world and an origin, those checks cannot tell the page script apart from other page code. That is why the content script treats everything from that side as untrusted data and fills in `origin` itself. Because the page script lives in the page's world, **anything it holds is visible to the page**. The repo treats it as a hostile environment. When the script was added as a `<script>` element (the MV2 path), it also removes that element after loading (`document.currentScript` handling in `fido2-page-script.ts`).
 
 Separately from the MAIN-world script, remember that anything the extension writes into the DOM (for instance a filled password in an `<input>`) is readable by page scripts. That is inherent to autofill.
 
@@ -401,14 +404,19 @@ Two lint rules push developers toward these abstractions: `**/platform/messaging
     if ("frameId" in sender && sender.frameId !== 0) {
 ```
 
-(`apps/browser/src/platform/browser/browser-api.ts`, `senderIsInternal`; condensed to the two checks.) It returns true only when `sender.origin` equals the extension's own origin and the sender is a top-level frame, and the doc calls it "a best-effort check that relies on the browser correctly populating `sender.origin`". Used in `apps/browser/src/platform/storage/background-memory-storage.service.ts`, `local-backed-session-storage.service.ts`, `background-task-scheduler.service.ts`, and `popup-view-cache-background.service.ts` before accepting a port.
+(`apps/browser/src/platform/browser/browser-api.ts`, `senderIsInternal`; condensed to the two checks.) It returns true only when `sender.origin` equals the extension's own origin and the sender is not a sub-frame (`frameId` is either absent, as for popups, or `0`). Its doc calls it "a best-effort check that relies on the browser correctly populating `sender.origin`". Both conditions matter:
+
+- A content script can open a port with any name it likes, but its `sender.origin` is the web page's origin, so the origin check rejects it.
+- An extension page embedded inside a web page, such as the inline menu's `menu.html`, does have the extension origin. But it sits in a sub-frame, so the `frameId` check rejects it.
+
+Callers run this check before accepting a port: `apps/browser/src/platform/storage/background-memory-storage.service.ts`, `apps/browser/src/platform/services/local-backed-session-storage.service.ts`, `apps/browser/src/platform/services/task-scheduler/background-task-scheduler.service.ts`, and `apps/browser/src/platform/services/popup-view-cache-background.service.ts`.
 
 ### A8.4 Long-lived ports: `chrome.runtime.connect` / `onConnect`
 
 A port is a persistent channel between two contexts. A port has a `name`, and the receiver sees `port.sender`. Examples:
 
 - **Content script liveness.** Every injected autofill script opens a port named `autofill-injected-script-port` (`AutofillPort.InjectedScript`, `apps/browser/src/autofill/enums/autofill-port.enum.ts`) via `setupExtensionDisconnectAction` (`utils/index.ts`). The background learns which `(tab, frame)` pairs are alive from those ports, and the content script learns the extension was reloaded or unloaded when `onDisconnect` fires, so it can clean up (`DefaultAutofillLifecycleService.handleInjectedScriptPortConnection` in `apps/browser/src/autofill/services/autofill-lifecycle.service.ts`).
-- **State sharing.** `ForegroundMemoryStorageService` in the popup connects a port to `BackgroundMemoryStorageService` so the popup and the background share one in-memory store in MV2 (`apps/browser/src/platform/storage/`).
+- **State sharing.** `ForegroundMemoryStorageService` (`apps/browser/src/platform/storage/`) in the popup connects a port to the background's memory store. In MV2, that store is `BackgroundMemoryStorageService`, which backs all popup memory state. In MV3, the popup reads ordinary memory state straight from `chrome.storage.session`, and uses the port only for the `memory-large-object` store (`LocalBackedSessionStorageService`). The wiring is in `apps/browser/src/popup/services/services.module.ts`, `OBSERVABLE_MEMORY_STORAGE` / `OBSERVABLE_LARGE_OBJECT_MEMORY_STORAGE`.
 - **Inline menu.** Four named ports exist, defined in `apps/browser/src/autofill/enums/autofill-overlay.enum.ts`:
 
 ```ts
@@ -420,7 +428,7 @@ export const AutofillOverlayPort = {
 } as const;
 ```
 
-The `Button`/`List` ports are opened by the content script in the page. The `...MessageConnector` ports are opened by the extension-origin container iframe (`menu.html`). The background accepts a connector port only if it is a known name, and accepts a command from it only if the message carries the right **port key**:
+The `Button`/`List` ports are opened by the content script (`AutofillInlineMenuIframeService`, once its iframe has loaded). The `...MessageConnector` ports are opened by the extension-origin container iframe (`menu.html`). The background ignores ports with unknown names. For any message arriving on these ports, it runs a handler only if the message carries the right **port key** and names a command in that connector's handler table:
 
 ```ts
     const tabPortKey = this.portKeyForTab[tabId];
@@ -429,7 +437,7 @@ The `Button`/`List` ports are opened by the content script in the page. The `...
     }
 ```
 
-(`apps/browser/src/autofill/background/overlay.background.ts`, `handleOverlayElementPortMessage`.) The key is a per-tab random string created in `handlePortOnConnect`: `this.portKeyForTab[port.sender.tab.id] = generateRandomChars(12)`, where `generateRandomChars` (`apps/browser/src/autofill/utils/index.ts`) uses `crypto.getRandomValues` and maps bytes onto 26 lowercase letters (about 56 bits for 12 characters, with a slight modulo bias; I note this as an observation, not a finding). The key is sent in the `initAutofillInlineMenu*` message over the content-script port; the content script relays it into the iframe with `postMessage` targeted at the extension origin (A8.6). A web page never sees that port, and the messages to the iframe name the extension origin as the target, so the page has no direct channel to learn it.
+(`apps/browser/src/autofill/background/overlay.background.ts`, `handleOverlayElementPortMessage`.) The key is a per-tab random string, created in `handlePortOnConnect` the first time a `Button`/`List` port connects from that tab and reused until the tab's key is deleted: `this.portKeyForTab[port.sender.tab.id] = generateRandomChars(12)`, where `generateRandomChars` (`apps/browser/src/autofill/utils/index.ts`) uses `crypto.getRandomValues` and maps bytes onto 26 lowercase letters (about 56 bits for 12 characters, with a slight modulo bias; I note this as an observation, not a finding). The key is sent in the `initAutofillInlineMenu*` message over the content-script port; the content script relays it into the iframe with `postMessage` targeted at the extension origin (A8.6). A web page never sees that port, and the messages to the iframe name the extension origin as the target, so the page has no direct channel to learn it.
 
 ### A8.5 Messages to a specific tab and frame: `tabs.sendMessage` with `frameId`
 
@@ -447,13 +455,13 @@ The background addresses content scripts like this (`apps/browser/src/autofill/s
         );
 ```
 
-`BrowserApi.tabSendMessage` (`browser-api.ts`) wraps `chrome.tabs.sendMessage(tab.id, obj, options, cb)`, where `options.frameId` selects one frame. Platform fact: per the Chrome documentation for this option, it sends to one specific frame "instead of all frames in the tab", so omitting it addresses every frame in the tab. The repo relies on both modes: `collectPageDetailsFromTab$` omits `frameId` to collect from every frame, and `doAutoFill` passes it so a fill lands in exactly one frame. Because the fill script goes to a specific frame, **the frame, not just the tab, is the unit of trust** (see A9).
+`BrowserApi.tabSendMessage` (`browser-api.ts`) wraps `chrome.tabs.sendMessage(tab.id, obj, options, cb)`, where `options.frameId` selects one frame. Platform fact: per the Chrome documentation for this option, it sends to one specific frame "instead of all frames in the tab", so omitting it addresses every frame in the tab. The repo relies on both modes. `collectPageDetailsFromTab$` omits `frameId` to collect from every frame (the popup does this), but passes it when given one, as the page-load path in `AutofillOrchestrator` does. `doAutoFill` always passes `frameId`, so each fill script lands in exactly one frame. Because the fill script goes to a specific frame, **the frame, not just the tab, is the unit of trust** (see A9).
 
 ### A8.6 `window.postMessage` between the page and extension iframes
 
 `postMessage` is the standard way for frames to talk across origins. The receiver gets `event.source`, `event.origin`, and `event.data`. Three sets of code use it:
 
-1. **Web vault to extension.** `apps/browser/src/autofill/content/content-message-handler.ts` listens for `message` events on the page `window`. It is intentionally reachable by page script (the Bitwarden web vault is a page), so it drops untrusted events and non-matching sources, forwards only an allowlist of commands, and attaches the sender's hostname for the background to verify:
+1. **Web vault to extension.** `apps/browser/src/autofill/content/content-message-handler.ts` listens for `message` events on the page `window`. It is intentionally reachable by page script, because the Bitwarden web vault is a page. It drops hand-built (untrusted) events and messages whose `source` is not this window, and handles only a fixed set of commands. It also attaches a `referrer`, which is the hostname taken from the browser-supplied `event.origin`, for the background to verify:
 
 ```ts
   if (!EventSecurity.isEventTrusted(event) || source !== window || !data?.command) {
@@ -472,9 +480,9 @@ The background then checks `referrer` with `isValidVaultReferrer` (`apps/browser
     );
 ```
 
-(`apps/browser/src/autofill/overlay/inline-menu/iframe-content/autofill-inline-menu-iframe.service.ts`.) Platform fact: the second argument is the `targetOrigin`; the browser delivers the message only if the receiving window's origin matches, so if the page swapped that iframe for something else, it would not receive the data.
+(`apps/browser/src/autofill/overlay/inline-menu/iframe-content/autofill-inline-menu-iframe.service.ts`.) **Platform fact:** the second argument is the `targetOrigin`. The browser delivers the message only if the receiving window's origin matches, so if the page navigated or swapped that iframe for something else, the new document would not receive the data. A related platform fact matters on the receiving side: a message posted by a content script arrives with `event.source` set to the page's window and `event.origin` set to the page's origin. Those are exactly the values page script would produce, so a receiver cannot use them to tell the content script apart from the page.
 
-3. **Inside the iframe stack.** See [C4](#c4-the-inline-menu-overlay): the container checks `event.source` identity, `portKey`, a session token, and an allowlist of commands.
+3. **Inside the iframe stack.** See [C4](#c4-the-inline-menu-overlay). The container checks `event.source` identity, requires a `portKey` to be present (the background checks its value), checks a session token on messages from the inner iframe, and forwards only an allowlist of commands.
 
 ### A8.7 Page-script bridge using `MessageChannel`
 
@@ -482,7 +490,7 @@ See the FIDO2 messenger in A7. Each request uses a private `MessageChannel` port
 
 ## A9. Frames
 
-**Platform fact:** A page can contain nested browsing contexts via `<iframe>`. The top-level one is the *top frame*; others are *sub-frames*. Each frame has its own document, origin, and JavaScript global. The same-origin policy says script in one origin cannot read the DOM of another origin; `window.postMessage` is the sanctioned cross-origin channel. An iframe with the `sandbox` attribute gets restricted privileges, and without `allow-same-origin` it gets an opaque origin (the string `"null"` for `origin`).
+**Platform fact:** A page can contain nested browsing contexts via `<iframe>`. The top-level one is the *top frame*; others are *sub-frames*. Each frame has its own document, origin, and JavaScript global. The same-origin policy says script in one origin cannot read the DOM of another origin; `window.postMessage` is the sanctioned cross-origin channel. An iframe with the `sandbox` attribute gets restricted privileges, and without `allow-same-origin` it gets an opaque origin, which serializes as the string `"null"`. An iframe sandboxed with *both* `allow-scripts` and `allow-same-origin` keeps its real origin. If that origin is also the parent's, its script can reach up and remove the sandbox entirely.
 
 **In the repo:**
 
@@ -497,13 +505,14 @@ export function currentlyInSandboxedIframe(): boolean {
   if (String(self.origin).toLowerCase() === "null" || globalThis.location.hostname === "") {
     return true;
   }
+  ...
 ```
 
-(`apps/browser/src/autofill/utils/index.ts`.) It is called from `InsertAutofillContentService.fillForm` and from both FIDO2 scripts.
+(`apps/browser/src/autofill/utils/index.ts`.) The first test catches opaque origins and documents with no hostname (for example `file:` pages). The elided part reads `globalThis.frameElement`, which is only available when the parent is same-origin, and looks at its `sandbox` attribute. It treats the frame as sandboxed unless the attribute includes both `allow-scripts` and `allow-same-origin`. The companion CVE note describes this as a later relaxation, so that sites that frame their own login form that way can be filled. The function is called from `InsertAutofillContentService.fillForm`, from `AutofillOverlayContentService.setupOverlayListeners` (so fields in sandboxed frames get no inline-menu listeners), and from both FIDO2 scripts.
 
 ### Why frames matter for autofill
 
-The browser tells the background the tab's top URL (`tab.url`). Credentials are chosen by matching that URL to saved logins. But the form being filled may sit in a sub-frame served from a different site than the tab. If autofill blindly filled it, a page that matches your saved login could embed an attacker's form in an iframe and receive your password. Part C explains the safeguard (`untrustedIframe`). The companion note [`vuln-cve-2018-25081-iframe-autofill.md`](./vuln-cve-2018-25081-iframe-autofill.md) covers the vulnerability class in depth.
+The browser tells the background the tab's top URL (`tab.url`). Credentials are chosen by matching that URL to saved logins. But the form being filled may sit in a sub-frame served from a different site than the tab. The sub-frame's own URL reaches the background as `details.url` in its page details. The frame's content script reads that from `location.href`. Page script can change that value only within its own origin, for example with `history.pushState`. If autofill blindly filled it, a page that matches your saved login could embed an attacker's form in an iframe and receive your password. Part C explains the safeguard (`untrustedIframe`). The companion note [`vuln-cve-2018-25081-iframe-autofill.md`](./vuln-cve-2018-25081-iframe-autofill.md) covers the vulnerability class in depth.
 
 ## A10. DOM concepts autofill relies on
 
@@ -511,7 +520,12 @@ Only items I found in the code are listed.
 
 ### Shadow DOM (open and closed)
 
-**Platform fact:** A *shadow root* attaches an encapsulated DOM subtree to a host element. In open mode (`mode: "open"`), page script can reach it via `element.shadowRoot`; in closed mode (`mode: "closed"`), `element.shadowRoot` returns `null`, so page scripts that do not hold the root reference cannot reach inside. Styles and `querySelector` do not cross the boundary.
+**Platform fact:** A *shadow root* attaches an encapsulated DOM subtree to a host element. In open mode (`mode: "open"`), page script can reach it via `element.shadowRoot`; in closed mode (`mode: "closed"`), `element.shadowRoot` returns `null`, so page scripts that do not hold the root reference cannot reach inside. `querySelector` from outside does not descend into it, and page style rules do not match elements inside it. Two things still cross the boundary:
+
+- Inherited CSS properties (such as `color`, `font`, and `visibility`) flow from the host into the shadow tree.
+- Page styles can always target the host element itself.
+
+That is why Bitwarden resets its host elements with `all: initial`. Closed mode is an encapsulation feature, not a full security boundary. For example, same-world script could patch `attachShadow` before the root is created. It works well here because the root is created by the content script, whose isolated world the page cannot patch (A7).
 
 Bitwarden uses closed roots on its own injected UI:
 
@@ -520,7 +534,7 @@ Bitwarden uses closed roots on its own injected UI:
     shadow.prepend(style);
 ```
 
-(`apps/browser/src/autofill/overlay/inline-menu/iframe-content/autofill-inline-menu-iframe-element.ts`.) The notification bar does the same with `mode: "closed"` and `delegatesFocus: true` (`apps/browser/src/autofill/overlay/notifications/content/overlay-notifications-content.service.ts`). Pages inside the extension iframes (`AutofillInlineMenuPageElement`) also attach closed roots.
+(`apps/browser/src/autofill/overlay/inline-menu/iframe-content/autofill-inline-menu-iframe-element.ts`; the `style` node is an internal stylesheet for pseudo-elements, see A10 `pointer-events`.) The notification bar does the same with `mode: "closed"` and `delegatesFocus: true` on a fixed-name host, `bit-notification-bar-root` (`apps/browser/src/autofill/overlay/notifications/content/overlay-notifications-content.service.ts`). Pages inside the extension iframes (`AutofillInlineMenuPageElement`) also attach closed roots.
 
 Bitwarden must also **read other sites' shadow DOM** to find login fields. `DomQueryService.getShadowRoot` (`apps/browser/src/autofill/services/dom-query.service.ts`) tries `node.shadowRoot` first, then extension-only APIs that can see closed roots:
 
@@ -541,7 +555,7 @@ Platform fact: these extension-only APIs let a content script see inside closed 
 
 ### Custom elements
 
-**Platform fact:** `customElements.define(name, class extends HTMLElement)` registers a new tag. Custom element names must contain a hyphen.
+**Platform fact:** `customElements.define(name, class extends HTMLElement)` registers a new tag. Custom element names must start with a lowercase ASCII letter and contain a hyphen.
 
 The inline menu host is a custom element with a random name per page load, defined on the fly:
 
@@ -558,7 +572,7 @@ The inline menu host is a custom element with a random name per page load, defin
     );
 ```
 
-(`apps/browser/src/autofill/overlay/inline-menu/content/autofill-inline-menu-content.service.ts`, `createButtonElement`; the elided line just above is `const customElementName = this.generateRandomCustomElementName();`, which is then passed to `define` and later to `document.createElement`.) The random name stops a page from targeting the host by a known tag name in CSS or `querySelector`. In Firefox the code uses a plain `<div>` instead (`isFirefoxBrowser` branch). The extension-origin pages define fixed element names (`customElements.define(AutofillOverlayElement.List, AutofillInlineMenuList)` in `bootstrap-autofill-inline-menu-list.ts`), which is fine because those pages are isolated from the website. The notification and some in-page UI are built with Lit (`apps/browser/src/autofill/content/components/`), per `.claude/rules/autofill-content-scripts.md`.
+(`apps/browser/src/autofill/overlay/inline-menu/content/autofill-inline-menu-content.service.ts`, `createButtonElement`; the elided line just above is `const customElementName = this.generateRandomCustomElementName();`, which is then passed to `define` and later to `document.createElement`.) The random name (8 to 12 letters with hyphens, from `generateRandomCustomElementName` in `apps/browser/src/autofill/utils/index.ts`, which uses `Math.random`) stops a page from targeting the host by a fixed, known tag name in CSS or `querySelector`. It is an obstacle, not a secret: the element is in the page DOM, so a page can still find it by other means, for example by watching for newly added elements. In Firefox the code uses a plain `<div>` instead (`isFirefoxBrowser` branch). The extension-origin pages define fixed element names (`customElements.define(AutofillOverlayElement.List, AutofillInlineMenuList)` in `bootstrap-autofill-inline-menu-list.ts`), which is fine because those pages are isolated from the website. The notification and some in-page UI are built with Lit (`apps/browser/src/autofill/content/components/`), per `.claude/rules/autofill-content-scripts.md`.
 
 ### `MutationObserver`
 
@@ -578,15 +592,18 @@ Used in two opposite directions:
       }
 ```
 
-(`autofill-inline-menu-content.service.ts`, `handleInlineMenuElementMutationObserverUpdate`.) Every mutation path has an "excessive iterations" circuit breaker: more than 100 mutation callbacks in 2 seconds closes the menu. The iframe service has its own observer that resets the iframe's `style` and attributes to defaults, and force-closes the menu once it has had to undo 10 foreign attribute changes (`foreignMutationsCount` in `autofill-inline-menu-iframe.service.ts`).
+(`autofill-inline-menu-content.service.ts`, `handleInlineMenuElementMutationObserverUpdate`.) A foreign `popover` value is reset to `"manual"`, a changed `style` is wiped and re-applied, and any other added attribute is removed. The host-element and container observers share an "excessive iterations" circuit breaker (`isTriggeringExcessiveMutationObserverIterations`). The counter resets only after 2 seconds with no callbacks, and if it passes 100, the menu closes. The `<html>`/`<body>` observers do not use the breaker; they re-run `checkPageRisks` instead. The iframe service has its own observer that resets the iframe's `style` and attributes to defaults. It force-closes the menu once it has had to undo 10 foreign changes (`foreignMutationsCount`), or after more than 20 observer callbacks without a 2-second pause (`autofill-inline-menu-iframe.service.ts`).
 
 ### `IntersectionObserver`
 
-Used once, as a measuring tool. To place the menu next to a field, `getBoundingClientRectFromIntersectionObserver` creates an observer on the focused field to get its rectangle, and falls back to `getBoundingClientRect()` if the result is empty (`apps/browser/src/autofill/services/autofill-overlay-content.service.ts`). It uses `threshold: 0.9999` with a comment: "Safari doesn't seem to function properly with a threshold of 1".
+Used in two places:
+
+- **As a measuring tool.** To place the menu next to a field, `getBoundingClientRectFromIntersectionObserver` creates an observer on the focused field to get its rectangle, and falls back to `getBoundingClientRect()` if the result is empty (`apps/browser/src/autofill/services/autofill-overlay-content.service.ts`). It uses `threshold: 0.9999` with a comment: "Safari doesn't seem to function properly with a threshold of 1".
+- **To re-check visibility.** `CollectAutofillContentService` observes fields that were not viewable when collected and recomputes `viewable` when they scroll into view (`handleFormElementIntersection` in `collect-autofill-content.service.ts`).
 
 ### The top layer and the Popover API
 
-**Platform fact:** The *top layer* is a browser-managed stacking layer that sits above all normal content regardless of `z-index`. Modal `<dialog>` elements (`:modal`) and elements shown via the Popover API are placed in it; later additions render on top of earlier ones. `popover="manual"` means the element is shown and hidden only through script (`showPopover()` / `hidePopover()`) and is not light-dismissed.
+**Platform fact:** The *top layer* is a browser-managed stacking layer that sits above all normal content regardless of `z-index`. Modal `<dialog>` elements (`:modal`), elements shown via the Popover API, and fullscreen elements are placed in it. Within the top layer, `z-index` has no effect: later additions render on top of earlier ones. So any page that can add its own top-layer element after Bitwarden's can cover it, and the only counter is to re-add (re-promote) one's own element. `popover="manual"` means the element is shown and hidden only through script (`showPopover()` / `hidePopover()`) and is not light-dismissed.
 
 In the repo this is the main weapon against being covered by a page:
 
@@ -600,7 +617,7 @@ In the repo this is the main weapon against being covered by a page:
 
 - finds other top-layer content (`:modal`, `:popover-open`, and optionally `[popover], dialog`) via `getUnownedTopLayerItems`,
 - re-promotes itself (`hidePopover()` then `showPopover()`) in `refreshTopLayerPosition` so it remains on top of a page's new dialog,
-- appends the menu inside an open modal `<dialog>` or an ARIA modal (`getInlineMenuContainerElement`) so the page's focus trap does not steal focus from the menu,
+- appends the menu inside an open modal `<dialog>` or an ARIA modal (`[role="dialog"]` or `[role="alertdialog"]` with `aria-modal="true"`) that contains the focused field, otherwise to `document.body` (`getInlineMenuContainerElement`), so the page's focus trap does not steal focus from the menu,
 - counts re-promotions and turns the inline menu off entirely when a page fights too aggressively:
 
 ```ts
