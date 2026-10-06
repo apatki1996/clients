@@ -83,16 +83,16 @@ Code can ask which manifest it runs under:
 
 ### Other MV2/MV3 differences visible in the manifests
 
-- **Host permissions.** MV2 lists host patterns inside `permissions` (`"<all_urls>"`, `"*://*/*"`) and also requests `webRequestBlocking`. MV3 has a separate `"host_permissions": ["https://*/*", "http://*/*"]` and adds `scripting`, `offscreen`, `sidePanel`, `activeTab`, and `webRequestAuthProvider`.
-- **Minimum Chrome.** `manifest.v3.json` sets `"minimum_chrome_version": "134.0"`. `apps/browser/webpack.base.js` has a comment saying the minimum is pinned so the store does not serve this build to a Chrome without a native feature the bundle relies on (see the comment near line 152; I did not trace which feature).
+- **Host permissions.** MV2 lists host patterns inside `permissions` (`"<all_urls>"`, `"*://*/*"`) and also requests `webRequestBlocking`. MV3 has a separate `"host_permissions": ["https://*/*", "http://*/*"]`. Its default permission list adds `scripting`, `offscreen`, `sidePanel`, `activeTab`, and `webRequestAuthProvider`. The Firefox MV3 list (`__firefox__permissions`) leaves out `offscreen` and `sidePanel`.
+- **Minimum Chrome.** `manifest.v3.json` sets `"minimum_chrome_version": "134.0"`. The comment in `apps/browser/webpack.base.js` (in `requiredPlugins`) gives the reason. The Chrome build drops core-js polyfills, because the Chrome Web Store flags core-js's IE-era `Object.create` shim as "obfuscated code". The minimum is pinned so the store never serves the build to a Chrome without native `Symbol.dispose` and explicit resource management, which "the SDK's `using` disposal needs".
 - **Web-accessible resources format** and **CSP format** (next two sections).
-- **Offscreen document.** Only built when `manifestVersion == 3` and the browser is not Firefox (`apps/browser/webpack.base.js`: `if (browser !== "firefox")`). See [A6](#a6-execution-contexts).
+- **Offscreen document.** Only built when `manifestVersion == 3` and the browser is not Firefox (`apps/browser/webpack.base.js`: `if (browser !== "firefox")`, with the comment "Firefox does not use the offscreen API"). See [A6](#a6-execution-contexts).
 
 ## A2. Permissions and host permissions
 
-**Platform fact:** `permissions` lists API capabilities the extension may use. Host permissions (in MV3, `host_permissions`) say which web origins the extension may script and read. A permission such as `tabs` exposes sensitive fields like `tab.url` and `tab.title` to the extension.
+**Platform fact:** `permissions` lists API capabilities the extension may use. Host permissions (in MV3, `host_permissions`) say which web origins the extension may script and read. The `tabs` permission exposes sensitive fields like `tab.url` and `tab.title` for every tab. A host permission also exposes them, but only for tabs whose URL it matches.
 
-**In the repo** (`apps/browser/src/manifest.v3.json`, `permissions`): `activeTab`, `alarms`, `clipboardRead`, `clipboardWrite`, `contextMenus`, `idle`, `offscreen`, `scripting`, `sidePanel`, `storage`, `tabs`, `unlimitedStorage`, `webNavigation`, `webRequest`, `webRequestAuthProvider`, `notifications`. Optional: `nativeMessaging`, `privacy` (the `privacy` one relates to controlling the browser's built-in password and address autofill; see `BrowserApi.browserAutofillSettingsOverridden` and `updateDefaultBrowserAutofillSettings` in `apps/browser/src/platform/browser/browser-api.ts`).
+**In the repo** (`apps/browser/src/manifest.v3.json`, the default `permissions` list; Firefox and Safari get their own lists, see A1): `activeTab`, `alarms`, `clipboardRead`, `clipboardWrite`, `contextMenus`, `idle`, `offscreen`, `scripting`, `sidePanel`, `storage`, `tabs`, `unlimitedStorage`, `webNavigation`, `webRequest`, `webRequestAuthProvider`, `notifications`. Optional: `nativeMessaging`, `privacy` (the `privacy` one relates to controlling the browser's built-in password and address autofill; see `BrowserApi.browserAutofillSettingsOverridden` and `updateDefaultBrowserAutofillSettings` in `apps/browser/src/platform/browser/browser-api.ts`).
 
 Why they matter for reading the code:
 
@@ -138,10 +138,13 @@ Why they matter for reading the code:
 (`apps/browser/src/background/runtime.background.ts`, `processMessageWithSender`.) `AutofillService.injectAutofillScripts` (`apps/browser/src/autofill/services/autofill.service.ts`) then decides which real scripts to inject into that frame, based on user settings and auth state:
 
 - one of four bootstrap bundles (`bootstrap-autofill.js`, `bootstrap-autofill-overlay-notifications.js`, `bootstrap-autofill-overlay-menu.js`, or `bootstrap-autofill-overlay.js`), chosen by the inline-menu and notification-bar settings (`getBootstrapAutofillContentScript`),
-- `autofiller.js` only when `triggeringOnPageLoad && autoFillOnPageLoadIsEnabled`, and that flag can be true only when the vault is unlocked,
-- `contextMenuHandler.js` always.
+- `autofiller.js` only when `triggeringOnPageLoad && autoFillOnPageLoadIsEnabled`, and that flag can be true only when there is an active account and its vault is unlocked,
+- `contextMenuHandler.js` always,
+- and, only when the call is not triggered by a page load (for example the re-injection into open tabs at install time), `content-message-handler.js` as well.
 
-This two-step design (a trivial static script that asks the background to inject the heavy scripts) lets the background decide per frame, and respects the user's blocked-domains list: `BrowserScriptInjectorService.inject` (`apps/browser/src/platform/services/browser-script-injector.service.ts`) refuses to inject on blocked URLs. The lifecycle design doc states that this static script also "wakes the service worker on every navigation regardless of auth state" (`apps/browser/src/autofill/lifecycle.design.md`).
+It then hands the frame to the lifecycle service (`autofillLifecycleService.startMonitoringFrame(tab, frameId)`).
+
+This two-step design (a trivial static script that asks the background to inject the heavy scripts) lets the background decide per frame, and respects the user's blocked-domains list: `BrowserScriptInjectorService.inject` (`apps/browser/src/platform/services/browser-script-injector.service.ts`) refuses to inject when the tab URL is blocked or, for a sub-frame injection, when that frame's URL is blocked (`findBlockedInjectionUrl`). The lifecycle design doc states that this static script also "wakes the service worker on every navigation regardless of auth state" (`apps/browser/src/autofill/lifecycle.design.md`).
 
 The injector picks the MV3 or MV2 API under the hood. In MV3 it calls `chrome.scripting.executeScript` with `world` defaulting to `ISOLATED` (`BrowserApi.executeScriptInTab` in `browser-api.ts`).
 
