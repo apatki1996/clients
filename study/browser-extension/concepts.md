@@ -667,7 +667,7 @@ What `BrowserApi` provides:
 
 - **Detection flags:** `isWebExtensionsApi` (`typeof browser !== "undefined"`), `isSafariApi`, `isChromeApi`, `isFirefox`, `isFirefoxOnAndroid`, `isManifestVersion(2|3)`.
 - **Promise wrappers** over callback APIs (`tabsQuery`, `getFrameDetails`, `getAllFrameDetails`, `tabSendMessage`, `createNewTab`).
-- **Manifest-version forks:** `executeScriptInTab` uses `chrome.scripting.executeScript` in MV3 (with `injectImmediately` from `runAt === "document_start"`) and `chrome.tabs.executeScript` in MV2; `registerContentScriptsMv2/Mv3`; `executeFunctionInTab`.
+- **Manifest-version forks:** `executeScriptInTab` uses `chrome.scripting.executeScript` in MV3 (with `injectImmediately` from `runAt === "document_start"`) and `chrome.tabs.executeScript` in MV2; `registerContentScriptsMv2/Mv3`; `executeFunctionInTab`; `reloadExtension` (which calls `self.location.reload()` on Safari instead of `chrome.runtime.reload()`, see B4).
 - **Listener management:** `BrowserApi.addListener` / `removeListener`. In Safari popups it records listeners and removes them on `pagehide`, to avoid memory leaks:
 
 ```ts
@@ -724,7 +724,7 @@ For autofill content scripts there is an extra rule: they are not part of the An
 **The popup (Angular).** `apps/browser/src/popup/main.ts` calls `platformBrowser().bootstrapModule(AppModule, ...)`. The app is a hybrid:
 
 - Older pieces are NgModule-based. `AppComponent` has `standalone: false` and `apps/browser/src/popup/app.module.ts` is an `@NgModule` with a long `imports` list.
-- Newer components are standalone: they list their own `imports: [...]` and set `changeDetection: ChangeDetectionStrategy.OnPush`. A small example with signals is `apps/browser/src/vault/popup/components/vault/fill-assist-active-banner/fill-assist-active-banner.component.ts` (uses `signal`, `computed`, and `toSignal` to bridge an RxJS stream). I infer standalone-ness from the `imports` array on the decorator; no `standalone: true` flag is set there.
+- Newer components are standalone: they list their own `imports: [...]` and set `changeDetection: ChangeDetectionStrategy.OnPush`. A small example with signals is `apps/browser/src/vault/popup/components/vault/fill-assist-active-banner/fill-assist-active-banner.component.ts` (uses `signal`, `computed`, and `toSignal` to bridge an RxJS stream). It sets no `standalone: true` flag because none is needed. Since Angular 19, components are standalone by default (the repo uses `@angular/core` 21), which is also why older components must say `standalone: false` explicitly.
 - Routing is in `apps/browser/src/popup/app-routing.module.ts`. The root route uses an auth-status redirect guard:
 
 ```ts
@@ -736,9 +736,9 @@ For autofill content scripts there is an extra rule: they are not part of the An
 
 The guards (`authGuard`, `lockGuard`, `redirectGuard`, and so on) come from `libs/angular/src/auth/guards/`. The `locked` route is the visible effect of the auth status in [B4](#b4-accounts-auth-status-vault-timeout-and-lock).
 
-**Dependency injection in the popup.** Angular's DI container is configured in `apps/browser/src/popup/services/services.module.ts` using `safeProvider({ provide, useClass/useFactory, deps })`, a wrapper that type-checks that the `deps` array matches the constructor. The repo rules (`.claude/rules/angular.md`) say to use `inject()` for new code and to wrap providers in `safeProvider`. (That rule file says to import `safeProvider` from `@bitwarden/ui-common`; `services.module.ts` imports it from `@bitwarden/angular/platform/utils/safe-provider`. I did not investigate which is current.)
+**Dependency injection in the popup.** Angular's DI container is configured in `apps/browser/src/popup/services/services.module.ts` using `safeProvider({ provide, useClass/useFactory, deps })`, a wrapper that type-checks that the `deps` array matches the constructor. The repo rules (`.claude/rules/angular.md`) say to use `inject()` for new code and to wrap providers in `safeProvider`. The rule file imports `safeProvider` from `@bitwarden/ui-common`, which is where it is defined (`libs/ui/common/src/di/safe-provider.ts`). `services.module.ts` still imports it from `@bitwarden/angular/platform/utils/safe-provider`. That file is a one-line re-export marked `@deprecated: Please use the SafeProvider & safeProvider from @bitwarden/ui-common`. It is the same function, and `@bitwarden/ui-common` is the current path for new code.
 
-The popup builds its **own copies** of services (for example its own `AutofillService` provider, and a `ForegroundMemoryStorageService` for memory state) and synchronizes through shared storage and messages, rather than calling the background's objects. That is why the memory-storage port pair exists.
+The popup builds its **own copies** of services, for example its own `AutofillService` provider and its own memory-storage services. It synchronizes with the background through shared storage and messages, rather than calling the background's objects. That is why the memory-storage port pair exists (A8.4).
 
 **The background (no Angular DI).** `MainBackground` (`apps/browser/src/background/main.background.ts`) is one very large class with a very large constructor that builds every service by hand with `new`, in dependency order:
 
@@ -754,7 +754,7 @@ The popup builds its **own copies** of services (for example its own `AutofillSe
     );
 ```
 
-Reasons are practical: a service worker has no Angular application, `libs/common` services cannot use `@Injectable` anyway, and construction order must be explicit and synchronous. Then `bootstrap()` runs migrations, loads the WASM SDK (`sdkLoadService.loadAndInit()`), tries auto-unlock, and calls `init()` on each background piece (`runtimeBackground`, `overlayBackground` via its init, `commandsBackground`, `fido2Background`, `autofillOrchestrator`, `vaultTimeoutService`, and others).
+Reasons are practical: a service worker has no Angular application, `libs/common` services cannot use `@Injectable` anyway, and construction order must be explicit and synchronous. Then `bootstrap()` loads the WASM SDK (`sdkLoadService.loadAndInit()`), runs state migrations, tries auto-unlock, and calls `init()` on each background piece (`runtimeBackground`, `overlayBackground` via its init, `commandsBackground`, `fido2Background`, `autofillOrchestrator`, `vaultTimeoutService`, and others).
 
 **Reading tip:** when something in the popup "just works," look at `services.module.ts`. When something in the background works, look at the constructor sequence in `main.background.ts`. Same abstractions (`CipherService`, `AuthService`), two wirings.
 
@@ -766,13 +766,13 @@ Reasons are practical: a service worker has no Angular application, `libs/common
 
 - `StateDefinition` (`state-definition.ts`): a named storage namespace with a default location of `"disk"` or `"memory"`, and optional per-client overrides.
 - `KeyDefinition` (`key-definition.ts`): one key inside that namespace for global state.
-- `UserKeyDefinition` (`user-key-definition.ts`): per-user state. It requires `clearOn: ["lock" | "logout"]`.
+- `UserKeyDefinition` (`user-key-definition.ts`): per-user state. It requires a `clearOn` array listing the events (`"lock"`, `"logout"`) that wipe it. The array may be empty (`clearOn: []`) for state that should survive both, as in the `AUTO_COPY_TOTP` example below.
 - `StateProvider` (`state.provider.ts`): the entry point (`getUserState$`, `getGlobal`, `getActive`, `getUser`, and so on). Implementations are in `libs/state-internal/src/` (`DefaultStateProvider`), and `MainBackground` constructs them.
 - The master list of definitions is `libs/state/src/core/state-definitions.ts`, for example `AUTOFILL_SETTINGS_DISK = new StateDefinition("autofillSettings", "disk")`.
 
 `libs/common/src/platform/state/index.ts` re-exports `@bitwarden/state` so most code imports from `@bitwarden/common/platform/state`.
 
-A real definition ties it together. The user key is held in memory only, and cleared on lock and logout:
+A real definition ties it together. The user key lives in `"memory"` state (`CRYPTO_MEMORY = new StateDefinition("crypto", "memory")`; in MV3 that means `chrome.storage.session`, see below), and is cleared on lock and logout:
 
 ```ts
 export const USER_KEY = new UserKeyDefinition<UserKey>(CRYPTO_MEMORY, "userKey", {
@@ -801,11 +801,11 @@ const AUTO_COPY_TOTP = new UserKeyDefinition(AUTOFILL_SETTINGS_DISK, "autoCopyTo
 | Location | Browser backing store (MV3) | Notes |
 | --- | --- | --- |
 | `disk` | `BrowserLocalStorageService` over `chrome.storage.local` (`apps/browser/src/platform/services/browser-local-storage.service.ts`) | Persistent. The code comment in `MainBackground` says secure storage "is not supported in browsers, so we use local storage and warn users when it is used". |
-| `memory` | `BrowserMemoryStorageService` over `chrome.storage.session` (`browser-memory-storage.service.ts`) | Survives a service worker restart but not a browser restart. |
-| `memory-large-object` | `LocalBackedSessionStorageService` | Encrypted copy in local storage, keyed by an ephemeral session key held in session storage. |
-| `disk-backup-local-storage` | `PrimarySecondaryStorageService` using the offscreen `localStorage` | A secondary copy for data that needs one. |
+| `memory` | `BrowserMemoryStorageService` over `chrome.storage.session` (`apps/browser/src/platform/services/browser-memory-storage.service.ts`) | Survives a service worker restart. Cleared on browser restart and on extension reload or update (see the platform fact below). |
+| `memory-large-object` | `LocalBackedSessionStorageService` (`apps/browser/src/platform/services/local-backed-session-storage.service.ts`) | Encrypted copy in `chrome.storage.local`, under an ephemeral session key held in `chrome.storage.session`. |
+| `disk-backup-local-storage` | `PrimarySecondaryStorageService` (`libs/common/src/platform/storage/primary-secondary-storage.service.ts`): primary `chrome.storage.local`, secondary the offscreen document's `localStorage` | Written to both. Per `client-locations.ts`, it is read from `localStorage` only when the primary returns nothing. |
 
-In MV2 the memory store is a real in-process object, `BackgroundMemoryStorageService`, shared with popups over ports:
+In MV2, the memory store is a real in-process object, `BackgroundMemoryStorageService`, shared with popups over ports. `memory-large-object` uses that same store, and `disk-backup-local-storage` uses the background page's own `localStorage` (`WindowStorageService`). The MV3 branch of that code:
 
 ```ts
     if (BrowserApi.isManifestVersion(3)) {
@@ -817,7 +817,7 @@ In MV2 the memory store is a real in-process object, `BackgroundMemoryStorageSer
 
 ### Why MV3 needs memory state persisted
 
-Because the service worker can be terminated at any time, plain JavaScript variables would be lost, including the in-memory user key, so the vault would appear locked after every worker restart. So "memory" state in MV3 is written to `chrome.storage.session`, an area that the platform keeps only for the browser session and does not write to disk (Platform fact; I rely on this being the documented behavior of `storage.session`). For bigger memory objects, `LocalBackedSessionStorageService` (`apps/browser/src/platform/services/local-backed-session-storage.service.ts`) stores encrypted data in local storage under a key kept only in session storage. Its header comment explains the effect: "When the session key is unavailable, any encrypted items in local storage cannot be decrypted and must be cleared". The same lifecycle problem explains why the lifecycle design says gate timers and monitoring state "are in-memory too" and must be rebuilt on restart (`lifecycle.design.md`, "Routing").
+Because the service worker can be terminated at any time, plain JavaScript variables would be lost, including the in-memory user key, so the vault would appear locked after every worker restart. So "memory" state in MV3 is written to `chrome.storage.session`. **Platform fact:** Chrome documents `storage.session` as held in memory and not persisted to disk. It is cleared when the browser restarts and when the extension is reloaded, updated, or disabled. By default it is not exposed to content scripts. The reload point matters for B4: the extension reload that follows a lock also empties this area. For bigger memory objects, `LocalBackedSessionStorageService` (`apps/browser/src/platform/services/local-backed-session-storage.service.ts`) stores encrypted data in local storage under a key kept only in session storage. The comment on `SessionKeyResolveService` in that file explains the effect: "When the session key is unavailable, any encrypted items in local storage cannot be decrypted and must be cleared". The same lifecycle problem explains why the lifecycle design says gate timers and monitoring state "are in-memory too" and must be rebuilt on restart (`lifecycle.design.md`, "Routing").
 
 ## B4. Accounts, auth status, vault timeout, and lock
 
@@ -833,7 +833,7 @@ export enum AuthenticationStatus {
 }
 ```
 
-(`libs/common/src/auth/enums/authentication-status.ts`; the file's doc comments define each.) It is computed from two facts, whether there is an access token and whether there is a user key in state:
+(`libs/common/src/auth/enums/authentication-status.ts`; the file's doc comments define each.) `AuthService.authStatusFor$` computes it per user. A user id that is not a valid GUID is `LoggedOut`. Otherwise the status comes from two facts, whether there is an access token and whether there is a user key in state:
 
 ```ts
         map(([userKey, hasAccessToken]) => {
@@ -851,15 +851,15 @@ export enum AuthenticationStatus {
 
 (`libs/common/src/auth/services/auth.service.ts`.) This is the whole security meaning of "locked": **the user key is gone from memory**, so nothing in the vault can be decrypted. Auth status drives behavior everywhere, for example `injectAutofillScripts` only enables autofill-on-page-load when `authStatus === AuthenticationStatus.Unlocked`, and the popup's `redirectGuard` sends users to `/lock` or `/login`.
 
-**Vault timeout.** `VaultTimeoutService` (`libs/common/src/key-management/vault-timeout/services/vault-timeout.service.ts`) checks every 10 seconds (`startCheck`, scheduled through the task scheduler) whether any user should lock. `shouldLock` skips a user whose vault view is focused and active, skips already locked or logged-out users, and otherwise compares last activity with the timeout. Timeout values are the `VaultTimeout` type (`types/vault-timeout.type.ts`): numeric minutes, or the strings `never`, `onRestart`, `onLocked`, `onSleep`, `onIdle`, `custom`. The action on timeout is `VaultTimeoutAction.Lock` or `LogOut`.
+**Vault timeout.** `VaultTimeoutService` (`libs/common/src/key-management/vault-timeout/services/vault-timeout.service.ts`) checks every 10 seconds (`startCheck`, scheduled through the task scheduler) whether any user should lock. `shouldLock` skips three kinds of user: the active user while an extension view is focused, a user whose timeout is suppressed by shared unlock, and users already locked or logged out. This 10-second loop also ignores the string timeouts (`never`, `onRestart`, and so on); it acts only on numeric timeouts. For a numeric timeout, it compares last activity with the timeout. Timeout values are the `VaultTimeout` type (`types/vault-timeout.type.ts`): numeric minutes, or the strings `never`, `onRestart`, `onLocked`, `onSleep`, `onIdle`, `custom`. The action on timeout is `VaultTimeoutAction.Lock` or `LogOut`.
 
-**Lock.** `DefaultLockService.lockUser` (`libs/unlock/src/lock.service.ts`) logs out instead if the user cannot lock, otherwise it:
+**Lock.** `DefaultLockService.lockUser` (`libs/unlock/src/lock.service.ts`) does nothing for a logged-out user, and logs out instead if the user cannot lock. Otherwise it:
 
 1. wipes decrypted state: `folderService.clearDecryptedFolderState`, `cipherService.clearCache`, `keyService.clearStoredUserKey`, then `stateEventRunnerService.handleEvent("lock", userId)`, which clears every state whose `clearOn` includes `"lock"` (including `USER_KEY`),
-2. waits until the auth status reads `Locked`,
-3. clears pending clipboard clearing and runs platform actions,
+2. waits (up to 5 seconds) until the auth status reads `Locked`,
+3. runs `systemService.clearPendingClipboard()`, which immediately performs any clipboard clear that was scheduled for a copied secret, then runs platform lock actions,
 4. sends the `"locked"` message,
-5. reloads the process ("Wipe the current process to clear active secrets in memory", per the source comment). `DefaultProcessReloadService.reloadProcess` (`libs/common/src/key-management/process-reload/default-process-reload.service.ts`) skips the reload while any account is still unlocked or an after-first-unlock PIN is active, so with several accounts the wipe happens only once none is unlocked.
+5. unless the caller suppressed it, reloads the process ("Wipe the current process to clear active secrets in memory", per the source comment). `DefaultProcessReloadService.reloadProcess` (`libs/common/src/key-management/process-reload/default-process-reload.service.ts`) skips the reload in two cases. The first is while any account is still unlocked, so with several accounts the wipe happens only once none is unlocked. The second is while the active account has an after-first-unlock ("ephemeral") PIN, because that PIN cannot survive a reload.
 
 In the browser, when the reload does proceed it is a real extension reload:
 
@@ -871,7 +871,7 @@ In the browser, when the reload does proceed it is a real extension reload:
     BrowserApi.reloadExtension();
 ```
 
-(`apps/browser/src/key-management/browser-process-reload.service.ts`.) This is also what produces the "extension context invalidated" situation that content scripts must handle, which is why every content script registers `setupExtensionDisconnectAction`. **Memory hygiene** here means the sensitive material lives in memory only while unlocked and, once no account is unlocked, the whole JS process is torn down. `main.background.ts` `logout` also ends with `await this.processReloadService.reloadProcess();`. Autofill's own lifecycle across these transitions is described in `apps/browser/src/autofill/lifecycle.design.md` ("Logging in", "Logging out", "Locking the vault", "Unlocking the vault" sequences).
+(`apps/browser/src/key-management/browser-process-reload.service.ts`. Before this, it clears all scheduled tasks. On Safari, `BrowserApi.reloadExtension` reloads the background page with `self.location.reload()` instead of `chrome.runtime.reload()`, to avoid a spurious "install" event.) This is also what produces the "extension context invalidated" situation that content scripts must handle, which is why every content script registers `setupExtensionDisconnectAction`. **Memory hygiene** here means the sensitive material lives in memory only while unlocked and, once no account is unlocked, the whole JS process is torn down. In MV3 Chrome, the reload also empties `chrome.storage.session` (B3). `main.background.ts` `logout` also ends with `await this.processReloadService.reloadProcess();`. Autofill's own lifecycle across these transitions is described in `apps/browser/src/autofill/lifecycle.design.md` ("Logging in", "Logging out", "Locking the vault", "Unlocking the vault" sequences).
 
 ## B5. Ciphers, zero-knowledge, and the key hierarchy
 
@@ -898,12 +898,12 @@ const _CipherType = Object.freeze({
 
 Two representations of the same item:
 
-- **`Cipher`** (`libs/common/src/vault/models/domain/cipher.ts`) is the encrypted form, as stored and synced. Text fields are `EncString` values. Its class comment is worth reading: only metadata (id, type, flags, dates, and so on) "are stable to read", the content fields are "Encryption-format internal, not public API", and callers should "Decrypt to a `CipherView` / `CipherListView` to inspect item contents".
+- **`Cipher`** (`libs/common/src/vault/models/domain/cipher.ts`) is the encrypted form, as stored and synced. Its class comment is worth reading. Only metadata (ids, `key`, `type`, flags, dates, and so on) "are stable to read". The content fields are "Encryption-format internal, not public API". Callers should "Decrypt to a `CipherView` / `CipherListView` to inspect item contents". The comment names two formats. In the legacy field-level format, each text field is its own `EncString`. In the newer blob format, those fields are `undefined`, and everything sensitive is sealed in one opaque `data` blob.
 - **`CipherView`** (`libs/common/src/vault/models/view/cipher.view.ts`) is the decrypted form, with plain-text `name`, `notes`, `login: LoginView`, `card: CardView`, and so on. Everything in autofill (`AutofillService`, `OverlayBackground`) works on `CipherView`s.
 
 The general naming: `domain` models are encrypted, `view` models are decrypted, `data` models are the JSON as stored/synced, and `api` models are server response shapes.
 
-`Cipher.decrypt` (marked deprecated in favor of SDK-based decryption) shows the per-item key step: if the cipher has a `key`, it is unwrapped with the user or organization key and used for that item's fields:
+`Cipher.decrypt` is marked `@deprecated` because it "may fail to decrypt ciphers if they are using blob encryption". It still shows the per-item key step: if the cipher has a `key`, it is unwrapped with the user or organization key and used for that item's fields:
 
 ```ts
     if (this.key != null) {
@@ -919,7 +919,7 @@ In current code, decryption and encryption of ciphers go through the Rust SDK: `
 
 **What the repo shows:**
 
-- Vault contents are **encrypted and decrypted on the client**. The server stores and returns `Cipher` objects whose sensitive fields are `EncString`s. The client decrypts after unlock, and the decrypted `CipherView` list is held in client memory (cleared on lock with `cipherService.clearCache`).
+- Vault contents are **encrypted and decrypted on the client**. The server stores and returns `Cipher` objects whose sensitive content is encrypted (per-field `EncString`s or a sealed blob). The client decrypts after unlock, and the decrypted `CipherView` list is held in client memory (cleared on lock with `cipherService.clearCache`).
 - The server authenticates the user with a derived value that is not the decryption key: `MasterPasswordAuthenticationHash` is documented as "The Base64-encoded master password authentication hash, that is sent to the server for authentication" (`libs/common/src/key-management/master-password/types/master-password.types.ts`).
 - The repo rule in `.claude/CLAUDE.md`: "**NEVER** send unencrypted vault data to API services."
 
@@ -972,11 +972,11 @@ Policies that touch the browser extension, found by searching the repo:
 | --- | --- | --- |
 | `ActivateAutofill` | `libs/common/src/autofill/services/autofill-settings.service.ts` (`activateAutofillOnPageLoadFromPolicy$`), applied by `AutofillService.setAutoFillOnPageLoadOrgPolicy` | Turns on autofill-on-page-load for members. |
 | `AutomaticAppLogIn` | `apps/browser/src/autofill/background/auto-submit-login.background.ts` | Enables auto-submit login for configured IdP hosts (see C3). |
-| `UriMatchDefaults` | `libs/common/src/autofill/services/domain-settings.service.ts` (`defaultUriMatchStrategyPolicy$`) | Forces a default URI match strategy; the code validates it against `Object.values(UriMatchStrategy)`. |
+| `UriMatchDefaults` | `libs/common/src/autofill/services/domain-settings.service.ts` (`defaultUriMatchStrategyPolicy$`, `resolvedDefaultUriMatchStrategy$`) | Sets the *default* URI match strategy, which per-URI settings still override. The code validates `policy.data.uriMatchDetection` against `Object.values(UriMatchStrategy)`. It resolves the default as `policySettingValue \|\| userSettingValue`. Because `Domain` is `0` (falsy), a policy value of `Domain` does not override a user's own non-Domain default (an observation from the code). |
 | `FillAssist` | `domain-settings.service.ts` | Org-driven fill assist, with an optional custom rules URL. |
 | `MaximumVaultTimeout` | `libs/common/src/key-management/vault-timeout/services/vault-timeout-settings.service.ts` | Caps the vault timeout. |
-| `OrganizationDataOwnership` | `apps/browser/src/autofill/background/notification.background.ts`, vault list filters | Used when deciding how new items are saved and filtered; I did not trace the details. |
-| `RemoveUnlockWithPin` | `apps/browser/src/auth/popup/settings/account-security.component.ts` | Affects the PIN unlock option in account security settings; I did not trace the details. |
+| `OrganizationDataOwnership` | `notification.background.ts` (`removeIndividualVault`), `apps/browser/src/autofill/notification/bar.ts`, `vault-popup-list-filters.service.ts`, `vault.component.ts` | Members may not keep items in their personal vault. Three effects in the extension: (1) the "add login" notification is told `removeIndividualVault: true`, so saving goes through the edit flow instead of straight into My Vault; (2) the popup hides the organization filter when the user belongs to only one organization; (3) the popup vault calls `enforceOrganizationDataOwnership` (`libs/vault/src/services/default-vault-items-transfer.service.ts`), which asks the user to move personal items into the organization's "My Items" collection. Per its doc comment, "Rejecting the transfer will result in the user being revoked from the organization." |
+| `RemoveUnlockWithPin` | `apps/browser/src/auth/popup/settings/account-security.component.ts` | When the policy is enabled, `pinEnabled$` is false, and the template hides the "Unlock with PIN" option unless a PIN is already set. If one is set, the option still shows so the user can turn it off. |
 
 Policy handling pattern: observe `policiesByType$`, and re-evaluate when the policy changes. `AutoSubmitLoginBackground.init` is a clean example: it filters to the unlocked state, then `switchMap`s into `policiesByType$(PolicyType.AutomaticAppLogIn, userId)`, and registers or tears down listeners according to `policy.enabled`.
 
@@ -1002,12 +1002,12 @@ Orientation docs in the repo: `apps/browser/src/autofill/README.md` (index and b
 
 ### Step 1: collect page details (content script)
 
-`CollectAutofillContentService.getPageDetails()` (`apps/browser/src/autofill/services/collect-autofill-content.service.ts`) scans the DOM (forms, fields, including shadow DOM) and returns an `AutofillPageDetails` (`apps/browser/src/autofill/models/autofill-page-details.ts`): `title`, `url`, `documentUrl`, `forms`, `fields`, `collectedTimestamp`. Each field gets an **`opid`** (an index-based id like `__0`, `__form__0`, set in `buildAutofillFieldItem`) so the background can refer to fields without holding DOM references. Field entries include attributes used for classification (`htmlID`, `htmlName`, `type`, `autoCompleteType`, label text, and a `viewable` flag computed by `DomElementVisibilityService`).
+`CollectAutofillContentService.getPageDetails()` (`apps/browser/src/autofill/services/collect-autofill-content.service.ts`) scans the DOM (forms, fields, including shadow DOM) and returns an `AutofillPageDetails` (`apps/browser/src/autofill/models/autofill-page-details.ts`): `title`, `url`, `documentUrl`, `forms`, `fields`, `collectedTimestamp`. Each field gets an **`opid`**, an index-based id like `__0` set in `buildAutofillFieldItem`. Forms get ids like `__form__0` in `buildAutofillFormsData`. The opid lets the background refer to fields without holding DOM references. The content script records it as a property on the element in its own isolated world, so page script cannot see it. The `url` field is `location.href` of the frame doing the collecting. Field entries include attributes used for classification (`htmlID`, `htmlName`, `type`, `autoCompleteType`, label text, and a `viewable` flag computed by `DomElementVisibilityService`).
 
 How a collect happens:
 
 - **Requested by the background**: `BrowserApi.tabSendMessage(tab, { command: "collectPageDetails", tab, sender }, { frameId })`. See `MainBackground.collectPageDetailsForContentScript` and `AutofillService.collectPageDetailsFromTab$`. The `sender` string says who asked (for example `ExtensionCommand.AutofillCommand` = `"autofill_cmd"`, `"autofillInit"`, `"contextMenu"`).
-- **Self-initiated** on load: `AutofillInit.collectPageDetailsOnLoad` sends `bgCollectPageDetails` after a 750 ms delay.
+- **Self-initiated** on load: when monitoring starts, `AutofillInit.collectPageDetailsOnLoad` waits for the page's `load` event (or proceeds immediately if the page has already loaded), then sends `bgCollectPageDetails` after a 750 ms delay. The background answers by sending `collectPageDetails` back to that frame.
 - The content script handler gates on monitoring state: `collectPageDetails: ({ message }) => this.isMonitoring ? this.collectPageDetails(message) : undefined` (`apps/browser/src/autofill/content/autofill-init.ts`).
 
 The content script replies with a **`collectPageDetailsResponse`** runtime message carrying `{ tab, details, sender }`.
@@ -1026,19 +1026,25 @@ The content script replies with a **`collectPageDetailsResponse`** runtime messa
             break;
 ```
 
-`AutofillOrchestrator` (`apps/browser/src/autofill/background/autofill-orchestrator.ts`) is the "single owner of runtime-message-driven autofill dispatch". It funnels three request kinds (`pageLoad`, `command`, `cipherType`) through one stream, **serialized per tab and per frame**, so two fills cannot race on one frame. The design doc explains why: it keeps "two fills from racing on a single frame — a race that could fill twice, or, if the page navigated between collecting its details and dispatching the fill, place a credential chosen for the old page onto the new one" (`autofill.design.md`).
+`AutofillOrchestrator` (`apps/browser/src/autofill/background/autofill-orchestrator.ts`) is the "single owner of runtime-message-driven autofill dispatch". It funnels three request kinds through one stream, **serialized per tab and per frame**, so two fills cannot race on one frame:
+
+- `pageLoad`: autofill on page load;
+- `command`: the login keyboard shortcut;
+- `cipherType`: the card and identity shortcuts.
+
+The popup, inline menu, and context menu call `AutofillService.doAutoFill` directly, without going through the orchestrator. The design doc explains why: it keeps "two fills from racing on a single frame — a race that could fill twice, or, if the page navigated between collecting its details and dispatching the fill, place a credential chosen for the old page onto the new one" (`autofill.design.md`).
 
 The orchestrator calls into `AutofillService` (`apps/browser/src/autofill/services/autofill.service.ts`):
 
-- `doAutoFillActiveTab` / `doAutoFillOnTab`: choose which cipher. For a user-initiated fill (`fromCommand = true`) it uses `cipherService.getNextCipherForUrl(tabUrl, userId)` (cycles through matches); for page load it uses the last launched or last used cipher for the URL. It then checks password reprompt (C5).
-- `doAutoFill(options)`: for each frame's page details, calls `generateFillScript(...)`, applies the untrusted-iframe gate, and sends the script.
+- `doAutoFillActiveTab` / `doAutoFillOnTab`: choose which cipher. For a keyboard-shortcut fill (`fromCommand = true`) it uses `cipherService.getNextCipherForUrl(tabUrl, userId)`, which cycles through matches. For page load (`fromCommand = false`) it uses the cipher launched for this URL in the last 30 seconds, or else the last used cipher. It then checks password reprompt (C5). Page-load fills also set `onlyEmptyFields`, `skipUsernameOnlyFill`, and `allowUntrustedIframe: false`, and do not fill TOTP fields.
+- `doAutoFill(options)`: for each frame's page details, it first drops entries whose `tab.id`/`tab.url` no longer match the live tab. Then it calls `generateFillScript(...)`, applies the untrusted-iframe gate, and sends the script to that frame.
 - `generateFillScript` (private): picks a path by cipher type (`generateLoginFillScript`, `generateCardFillScript`, `generateIdentityFillScript`, `generateSshKeyFillScript`), or `generateTargetedFillScript` when the page has fields flagged by targeting rules. The result is an `AutofillScript` (`apps/browser/src/autofill/models/autofill-script.ts`):
 
 ```ts
 export type FillScript = [action: FillScriptActions, opid: string, value?: string];
 ```
 
-with actions `fill_by_opid`, `click_on_opid`, `focus_by_opid`, plus `properties`, `savedUrls`, and `untrustedIframe`. So the fill script is **data**: a list of (action, field id, value). The content script interprets only these three verbs.
+The actions are `fill_by_opid`, `click_on_opid`, and `focus_by_opid`. The script also carries `properties`, `savedUrls` (the login's URIs, excluding `Never`), and the `untrustedIframe` flag. So the fill script is **data**: a list of (action, field id, value). The content script interprets only these three verbs.
 
 ### Step 3: insert (content script)
 
@@ -1050,7 +1056,7 @@ The background sends `fillForm` to the one frame via `tabSendMessage(..., { fram
     }
 ```
 
-(`apps/browser/src/autofill/content/autofill-init.ts`.) It then calls `InsertAutofillContentService.fillForm` (`apps/browser/src/autofill/services/insert-autofill-content.service.ts`), which refuses in sandboxed iframes, shows insecure-page and untrusted-iframe confirmation prompts, and runs each action with a 20 ms delay: `fill_by_opid` looks up the element by opid via `collectAutofillContentService.getAutofillFieldElementByOpid`, sets `.value`, and fires simulated pre- and post-insert events (click, focus, keyboard, `input`/`change`) so framework-driven pages register the change.
+(`apps/browser/src/autofill/content/autofill-init.ts`. `pageDetailsUrl` is the `details.url` from the collection that the background used.) It then calls `InsertAutofillContentService.fillForm` (`apps/browser/src/autofill/services/insert-autofill-content.service.ts`), which refuses in sandboxed iframes, shows insecure-page and untrusted-iframe confirmation prompts, and runs each action with a 20 ms delay: `fill_by_opid` looks up the element by opid via `collectAutofillContentService.getAutofillFieldElementByOpid`, sets `.value`, and fires simulated pre- and post-insert events (click, focus, keyboard, `input`/`change`) so framework-driven pages register the change.
 
 ### Message command names, collected
 
@@ -1070,7 +1076,7 @@ The page-load variant adds a front half: `autofiller.js` polls `window.location.
 
 ### Fill targeting and retry classification (read these two sections of the design doc)
 
-- *Fill targeting* (`autofill.design.md`): a page-load fill must target the frame "resolved live, by id, at the moment of the fill", not a snapshot, because "Filling from the transition's stale snapshot would put a cipher chosen for the _old_ page into whatever page now occupies that frame — a credential handed to the wrong origin." In code, `AutofillOrchestrator.resolveFreshTarget` re-reads the tab and the frame's live URL and abandons if the URL differs from the one reported with the transition, and `dispatch` compares `details?.url === request.frameUrl`.
+- *Fill targeting* (`autofill.design.md`): a page-load fill must target the frame "resolved live, by id, at the moment of the fill", not a snapshot, because "Filling from the transition's stale snapshot would put a cipher chosen for the _old_ page into whatever page now occupies that frame — a credential handed to the wrong origin." In code, the reported URL is the browser-supplied `sender.url` of the `pageTransitionDetected` message (`runtime.background.ts`). `AutofillOrchestrator.resolveFreshTarget` re-reads the tab, and for a sub-frame also `getFrameDetails`, then abandons the fill if the live URL differs from the reported one. `dispatch` then skips the fill unless the freshly collected `details?.url === request.frameUrl`. It also fills only if the tab is still the active tab of the current window (a `FIXME (PM-39579)` stopgap until the tab gate replaces it).
 - *Retry classification*: only "a cipher matched, but no field accepted a value yet" is retryable.
 
 ## C2. URI matching, and why it is security critical
@@ -1088,7 +1094,7 @@ export const UriMatchStrategy = {
 } as const;
 ```
 
-(`libs/common/src/models/domain/domain-service.ts`, whose header comment quotes the user-facing definitions: Domain means "the top-level domain and second-level domain of the URI match the detected resource", Host means hostname and port match, and so on.) A per-URI `match` overrides the user's default (`defaultUriMatchStrategy`, default `Domain`; possibly forced by the `UriMatchDefaults` policy).
+(`libs/common/src/models/domain/domain-service.ts`, whose header comment quotes the user-facing help-page definitions. For example, Domain means "the top-level domain and second-level domain of the URI match the detected resource", and Host means "the hostname and (if specified) port of the URI matches the detected resource". Those are simplifications; the exact code semantics are below.) A per-URI `match` overrides the default strategy. The default is the user's `defaultUriMatchStrategy`, which starts as `Domain`, or the `UriMatchDefaults` policy value when one is set (see B7 for a caveat). If neither is set, `matchesUri` falls back to `Domain`.
 
 The matching function is `LoginUriView.matchesUri` (`libs/common/src/vault/models/view/login-uri.view.ts`):
 
@@ -1103,13 +1109,22 @@ The matching function is `LoginUriView.matchesUri` (`libs/common/src/vault/model
         return targetUri.startsWith(this.uri);
 ```
 
-`Host` (elided above) compares `Utils.getHost` of both URLs, which is hostname plus port when a port is present.
+Here `targetUri` is the page URL being checked, and `this.uri` is the saved URI string. The exact semantics of each strategy:
 
-`RegularExpression` builds `new RegExp(this.uri, "i")` and returns `false` on an invalid pattern; `Never` returns `false`. `LoginView.matchesUri` ORs across all URIs, and `CipherService.filterCiphersForUrl` (`libs/common/src/vault/services/cipher.service.ts`) filters the vault: it skips deleted and archived ciphers, and applies `matchesUri` to logins using the page's equivalent domains and the default strategy. `getAllDecryptedForUrl` is the usual entry point.
+| Strategy | What the code compares | Consequences to know |
+| --- | --- | --- |
+| `Domain` | `Utils.getDomain(saved)` must be in the set {`getDomain(target)`} plus the target's equivalent domains, with a punycode/Unicode-normalized retry, then the blacklist check below | Scheme, port, subdomain and path are all ignored. A login saved for `https://example.com` matches `http://login.example.com:8080/x`. |
+| `Host` (elided above) | `Utils.getHost(target) === Utils.getHost(saved)`; `getHost` is the `URL.host`, that is hostname plus port, with default ports dropped | Scheme is ignored. A port on only one side means no match. Equivalent domains are not used. |
+| `StartsWith` | `targetUri.startsWith(this.uri)` on the raw strings | Pure string prefix, see below. |
+| `Exact` | `targetUri === this.uri` | Whole URL string, so query string, fragment and trailing slash all matter. Case-sensitive. |
+| `RegularExpression` | `new RegExp(this.uri, "i").test(targetUri)`, or `false` on an invalid pattern | Case-insensitive and **unanchored**: it matches anywhere in the URL unless the pattern uses `^`/`$`. |
+| `Never` | always `false` | |
+
+The comparison against a saved URI with no scheme still works for `Domain` and `Host`, because `Utils.getUrl` assumes `http://` when the string has none but contains a dot. `LoginView.matchesUri` ORs across all URIs, and `CipherService.filterCiphersForUrl` (`libs/common/src/vault/services/cipher.service.ts`) filters the vault: it skips deleted and archived ciphers, and applies `matchesUri` to logins using the page's equivalent domains and the default strategy. `getAllDecryptedForUrl` is the usual entry point.
 
 ### Domain strategy, `Utils.getDomain`, and the Public Suffix List
 
-`Domain` compares the **registrable domain** (for `login.example.co.uk`, that is `example.co.uk`). That needs the Public Suffix List (PSL): a community list of suffixes under which anyone can register names (`.com`, `.co.uk`, and also private suffixes such as `github.io`). The repo uses the `tldts` library:
+`Domain` compares the **registrable domain**, also called eTLD+1: the public suffix plus one more label. For `login.example.co.uk`, that is `example.co.uk`. Finding it needs the Public Suffix List (PSL). **Platform fact:** the PSL is a community-maintained list of suffixes under which separate parties can register or be given names. Its ICANN section holds suffixes like `.com` and `.co.uk`. Its private section holds suffixes that companies run for their users, such as `github.io`. The repo uses the `tldts` library:
 
 ```ts
       const parseResult = parse(uriString, {
@@ -1121,8 +1136,8 @@ The matching function is `LoginUriView.matchesUri` (`libs/common/src/vault/model
 (`libs/common/src/platform/misc/utils.ts`, `Utils.getDomain`; `import { getHostname, parse } from "tldts"` at the top.) Details visible there:
 
 - `validHosts` is `["localhost"]`; `localhost` and IP addresses are returned as-is.
-- `data:` and `about:` URIs return `null`.
-- `allowPrivateDomains: true` makes tldts treat private-section PSL entries as suffixes, so two different users' subdomains under such a suffix have different registrable domains (this is how the library behaves; I did not test it in this environment).
+- `data:` and `about:` URIs return `null`, so `Domain` never matches them.
+- `allowPrivateDomains: true` makes tldts treat private-section PSL entries as public suffixes. So `alice.github.io` and `bob.github.io` have different registrable domains, and a login saved for one does not match the other under `Domain`. Without that option, both would reduce to `github.io` and match each other. This is the library's documented option behavior; I did not run it in this environment.
 - `Utils.DomainMatchBlacklist = new Map([["google.com", new Set(["script.google.com"])]])`, used in `matchesDomain`: even if the domain matches, `script.google.com` is excluded for a `google.com` login, because `script.google.com` hosts user-controlled content.
 - `matchesDomain` normalizes punycode and Unicode forms before comparing (`punycodeToUnicode` in `libs/common/src/autofill/utils/punycode.ts`), so an internationalized domain saved as Unicode matches its punycode (`xn--...`) form. This is a correctness feature; it also shows why homograph/lookalike domains are a concern, as each distinct string is a different domain.
 
@@ -1136,27 +1151,27 @@ Users and Bitwarden define groups of domains treated as the same site (for examp
         return new Set(equivalents);
 ```
 
-The data comes from sync: `default-sync.service.ts` merges the user's own `equivalentDomains` with the server's `globalEquivalentDomains` and stores them with `setEquivalentDomains`. In `matchesUri`, the target domain is added to that set (`equivalentDomains.add(targetDomain)`), then `matchesDomain` checks whether the saved URI's domain is in the set.
+The function finds every group that contains the page's registrable domain and returns the union of those groups. The data comes from sync: `syncSettings` in `libs/common/src/platform/sync/default-sync.service.ts` merges the user's own `equivalentDomains` with the server's `globalEquivalentDomains` (as sent by the server) and stores them with `setEquivalentDomains`. In `matchesUri`, the target domain is added to that set (`equivalentDomains.add(targetDomain)`). Then `matchesDomain` checks whether the saved URI's domain is in the set. Only `Domain` uses equivalent domains. `Host`, `Exact`, `StartsWith`, and `RegularExpression` ignore them.
 
 ### Why this is security critical (phishing)
 
 Autofill is only safe if "this page" really is "the saved site". If the match is too loose, a lookalike or attacker-controlled page gets your password with no typing. The design pushes safety in several ways:
 
-- Default `Domain` strategy compares registrable domains, so `evil-example.com` does not match `example.com`. A subdomain of the legit domain does match under `Domain`, which is why `Host`, `Exact` and `StartsWith` exist for stricter needs.
-- **`StartsWith` is a prefix match**, so a saved `https://example.com` also matches `https://example.com.evil.test/` (string prefix). The strategy exists for flexibility, and the safety of the pattern is left to whoever chooses it. I flag it here as the type of thing an interviewer might probe.
-- **`RegularExpression`** runs user-supplied patterns against URLs, so a bad pattern can match too much (or be slow; I did not evaluate that).
-- **HTTP vs HTTPS and frames** are checked separately (C5).
-- **The URL the browser reports for the tab** (`tab.url`, from the privileged `tabs` API) is what is matched, not anything the page claims about itself.
+- The default `Domain` strategy compares registrable domains, so `evil-example.com` does not match `example.com`. Any subdomain of the legitimate domain does match under `Domain`, including one that hosts user content. That is why `Host`, `Exact`, and `StartsWith` exist for stricter needs, and why the code keeps a small blacklist (`script.google.com`).
+- **`StartsWith` is a raw string prefix.** A saved `https://example.com` therefore also matches `https://example.com.evil.test/`. Saving it with a trailing slash (`https://example.com/`) avoids that particular case. The strategy exists for flexibility, and the safety of the saved string is left to whoever chooses it. I flag it here as the type of thing an interviewer might probe.
+- **`RegularExpression`** runs user-supplied, unanchored, case-insensitive patterns against the full URL. A pattern like `example\.com` also matches `https://evil.test/?example.com`. Patterns can also be slow (catastrophic backtracking); I did not evaluate that.
+- **Scheme is ignored by `Domain` and `Host`**, so a login saved on `https://` also matches the `http://` version of the site. The HTTPS-to-HTTP downgrade is caught by a separate prompt in the content script (C5). Frames are also checked separately (C5).
+- **The URL the browser reports for the tab** (`tab.url`, from the privileged `tabs` API) is what picks the cipher, not anything the page claims about itself. The frame check in C5 uses the frame's `location.href` as read by Bitwarden's own content script.
 
 ## C3. Autofill triggers
 
 | Trigger | Entry point | Notes |
 | --- | --- | --- |
-| **Manual, from the popup** | `VaultPopupAutofillService.doAutofill` (`apps/browser/src/vault/popup/services/vault-popup-autofill.service.ts`) | Collects page details with `collectPageDetailsFromTab$`, then `autofillService.doAutoFill({ tab, cipher, pageDetails, doc: window.document, fillNewPassword: true, allowTotpAutofill: true })`. Password reprompt is asked in the popup unless skipped. Copies TOTP to clipboard after a successful fill. |
-| **Keyboard shortcut** | `CommandsBackground.processCommand` (`apps/browser/src/background/commands.background.ts`) | Manifest `commands` `autofill_login` (suggested `Ctrl+Shift+L`), `autofill_card`, `autofill_identity`. If the vault is not unlocked it opens the unlock popout and queues a retry. The retry keeps its sender under a symbol (`RETRY_SENDER`) and is accepted only if it arrived via the intraprocess channel: "This ensures that the command to retry never round-tripped through a untrusted environment." |
-| **Context menu** | `ContextMenuClickedHandler` (`apps/browser/src/autofill/browser/context-menu-clicked-handler.ts`) and `main-context-menu-handler.ts` | Per-cipher "autofill" and "copy username/password/TOTP" entries; checks password reprompt first and opens `openVaultItemPasswordRepromptPopout` when needed. |
+| **Manual, from the popup** | `VaultPopupAutofillService.doAutofill` (`apps/browser/src/vault/popup/services/vault-popup-autofill.service.ts`) | Collects page details from every frame with `collectPageDetailsFromTab$(tab)`, then `autofillService.doAutoFill({ tab, cipher, pageDetails, doc: window.document, fillNewPassword: true, allowTotpAutofill: true })`. Password reprompt is asked in the popup unless skipped. Copies TOTP to clipboard after a successful fill. |
+| **Keyboard shortcut** | `CommandsBackground.processCommand` (`apps/browser/src/background/commands.background.ts`), then `collectPageDetailsResponse` in `runtime.background.ts`, then `AutofillOrchestrator` (`command` or `cipherType` request) | Manifest `commands` `autofill_login` (suggested `Ctrl+Shift+L`), `autofill_card`, `autofill_identity`. If the vault is not unlocked it opens the unlock popout and queues a retry. The retry keeps its sender (with the target tab) under a symbol (`RETRY_SENDER`), and `handleUnlockCompleted` accepts it only if it is not tagged as external, that is, it arrived via the intraprocess channel: "This ensures that the command to retry never round-tripped through a untrusted environment." |
+| **Context menu** | `ContextMenuClickedHandler` (`apps/browser/src/autofill/browser/context-menu-clicked-handler.ts`) and `main-context-menu-handler.ts`; the fill itself runs in `RuntimeBackground.autofillPage` | Per-cipher "autofill" and "copy username/password/TOTP" entries; checks password reprompt first and opens `openVaultItemPasswordRepromptPopout` when needed. |
 | **Autofill on page load** | `autofiller.ts` to `pageTransitionDetected` to lifecycle service to `AutofillOrchestrator` `pageLoad` request | Off by default; the policy `ActivateAutofill` can switch it on. Tab must be "committed". Never fills untrusted iframes (it passes `allowUntrustedIframe: false` because `fromCommand` is false) and never fills reprompt-protected ciphers. |
-| **Inline menu (overlay)** | `OverlayBackground.fillInlineMenuCipher` (`overlay.background.ts`) | User clicks an item in the in-page menu. See C4. |
+| **Inline menu (overlay)** | `OverlayBackground.fillInlineMenuCipher` (`overlay.background.ts`) | User clicks an item in the in-page menu. Uses the page details the background has stored for the tab, then calls `doAutoFill` with `allowUntrustedIframe` left undefined. See C4. |
 | **TOTP copying** | `AutofillService.getShouldAutoCopyTotp`, `getTotpCopyCode`; `AutofillOrchestrator.copyTotp`; also the inline menu | After a successful fill of a login that has a TOTP secret, the code may be copied to the clipboard (the `autoCopyTotp` setting defaults to true). Premium or org-TOTP access is checked (`canUseTotp`). |
 | **Auto-submit login** | `AutoSubmitLoginBackground` (`apps/browser/src/autofill/background/auto-submit-login.background.ts`) and `content/auto-submit-login.ts` | Policy-gated (`AutomaticAppLogIn`). See below. |
 
@@ -1166,8 +1181,8 @@ This is an enterprise feature for SSO-style flows: after a redirect, fill and su
 
 - Only active if the `AutomaticAppLogIn` policy is enabled and applies to the user, the vault is `Unlocked`, and the policy lists IdP hosts (`parseIpdHostsFromPolicy`, `validIdpHosts`).
 - Triggered by a URL hash containing `autosubmit=1` (`urlContainsAutoSubmitHash`), but only after a request whose **initiator** is a valid IdP host or already-valid auto-submit host. The redirect handler documents why: "The initiator check prevents any origin from 302'ing to `target#autosubmit=1` to force autofill there."
-- Uses `chrome.webRequest.onBeforeRequest` and `onBeforeRedirect` listeners limited to `main_frame` and `sub_frame` types, and clears state if a POST is seen or the main frame goes to an invalid host.
-- Injects `content/auto-submit-login.js` only when the vault is unlocked, and fills with `triggerAutoSubmitLogin` using the same fill-script mechanism.
+- Uses `chrome.webRequest.onBeforeRequest` and `onBeforeRedirect` listeners limited to `main_frame` and `sub_frame` types. It clears state when it sees a POST from a valid initiator after submission, or when the main frame goes to an invalid host.
+- Injects `content/auto-submit-login.js` only when the vault is unlocked. The fill goes through `doAutoFillOnTab(..., fromCommand = true, autoSubmitLogin = true)` and the `triggerAutoSubmitLogin` message, using the same fill-script mechanism and the same `InsertAutofillContentService.fillForm` prompts.
 
 ## C4. The inline menu (overlay)
 
@@ -1175,9 +1190,9 @@ The **inline menu** is the small Bitwarden icon inside a login field and the dro
 
 ### Structure: four nested layers
 
-1. **Host element in the page** (content script, top frame only). A custom element with a random name (Firefox: a `div`) with `popover="manual"`, appended to `document.body` (or into an open modal dialog), forced to the top layer with `showPopover()`. Pages see this element and can touch its attributes, styles, and position in the DOM.
-2. **Closed shadow root** on the host (`attachShadow({ mode: "closed" })`, see A10). The only thing inside is the iframe, so the page cannot enumerate or query it.
-3. **Extension-origin iframe** (`src` is `overlay/menu.html`, the "menu container"), created by `AutofillInlineMenuIframeService.initMenuIframe`. Its attributes include `credentialless` and `tabIndex: "-1"`. It is cross-origin to the page, so the page cannot reach its DOM, and the `<iframe>` element itself sits inside the closed shadow root. However, `menu.html` is web-accessible (A4), so a page could also load a copy of it in an iframe of its own; that is why the container authenticates its messages (below).
+1. **Host element in the page** (content script, top frame only). A custom element with a random name (Firefox: a `div`) with `popover="manual"`. It is appended to `document.body`, or into the open modal `<dialog>` or ARIA modal that holds the focused field, and forced to the top layer with `showPopover()`. Pages see this element and can touch its attributes, styles, and position in the DOM. The mutation observers in A10 undo such changes.
+2. **Closed shadow root** on the host (`attachShadow({ mode: "closed" })`, see A10). Inside are an internal `<style>` node (the pseudo-element guard), the iframe, and, when used, an `aria-live` alert `div` for screen readers. Page script cannot get a reference to the root, so it cannot query or modify what is inside.
+3. **Extension-origin iframe** (`src` is `overlay/menu.html`, the "menu container"), created by `AutofillInlineMenuIframeService.initMenuIframe`. Its attributes include `credentialless`, `tabIndex: "-1"`, and `scrolling: "no"`. It is cross-origin to the page, so the page cannot reach its DOM, and the `<iframe>` element itself sits inside the closed shadow root. However, `menu.html` is web-accessible (A4), so a page could also load a copy of it in an iframe of its own; that is why the container authenticates its messages (below).
 4. **Nested sandboxed iframe** created *by the container page* (`apps/browser/src/autofill/overlay/inline-menu/pages/menu-container/autofill-inline-menu-container.ts`). Its attributes:
 
 ```ts
@@ -1191,16 +1206,26 @@ The **inline menu** is the small Bitwarden icon inside a login field and the dro
   };
 ```
 
-`sandbox="allow-scripts"` without `allow-same-origin` gives an opaque origin, so this innermost iframe (which loads `overlay/menu-button.html` or `overlay/menu-list.html`, drawn by `AutofillInlineMenuButton` / `AutofillInlineMenuList` custom elements with their own closed shadow roots) has no extension API access and, being cross-origin to both the page and the container, cannot be scripted by either. All real work goes through message passing.
+`sandbox="allow-scripts"` without `allow-same-origin` gives an opaque origin. This innermost iframe loads `overlay/menu-button.html` or `overlay/menu-list.html`, which are drawn by `AutofillInlineMenuButton` / `AutofillInlineMenuList` custom elements with their own closed shadow roots. On Chrome, those pages are also manifest sandbox pages (A5). So the innermost frame has no extension API access, and because it is cross-origin to both the page and the container, neither can script it. All real work goes through message passing.
 
-I could not find a comment explaining the choice of two nested extension iframes; the structure suggests the middle layer is a trusted **broker** with extension API access, and the innermost layer is the **untrusted renderer** that only shows data and relays user clicks. That reading is my inference from the code, not a documented rationale.
+The container only creates the inner iframe after it receives a valid init message. Before creating it, the container checks that the `iframeUrl` it was given is an extension URL under the expected extension origin (`isExtensionUrlWithOrigin`).
+
+**Platform fact about `credentialless`:** in Chromium, the `credentialless` attribute loads the iframe in a fresh, ephemeral storage context. The frame gets no access to its origin's existing cookies or storage, and it does not change how scripting or `postMessage` work. Other browsers ignore the attribute. The repo sets it on both the container iframe and the inner iframe without a comment, so its intended benefit here is not documented.
+
+I could not find a comment explaining the choice of two nested extension iframes. The structure suggests the middle layer is a trusted **broker** with extension API access, and the innermost layer is the **untrusted renderer** that only shows data and relays user clicks. That reading is my inference from the code, not a documented rationale.
 
 ### Why it is built this way
 
 - **Isolation from page scripts**: A page cannot read inside a cross-origin iframe or a closed shadow root, so it cannot read cipher names, usernames, or TOTP codes shown in the menu (`buildCipherData` in `overlay.background.ts` sends the iframe `name`, `username`, TOTP code, favicon, and so on, but not the password, as I read the code).
-- **Isolation from page CSS**: styles do not cross a shadow root or an iframe boundary; the host element resets with `all: "initial"` and uses `!important` pseudo-element rules (`autofill-inline-menu-iframe-element.ts`).
+- **Isolation from page CSS**: page style rules do not reach inside a shadow root or an iframe. Inherited properties and rules aimed at the host itself still do, so the host element resets with `all: "initial"` and the shadow root carries `!important` pseudo-element rules (`autofill-inline-menu-iframe-element.ts`).
 - **Resistance to being covered or hidden**: top layer, max z-index, `getPageIsOpaque`, `elementFromPoint` checks, and mutation observers (A10).
-- **No sensitive data in the page's reach**: the iframe receives cipher *display* data with synthetic ids of the form `inline-menu-cipher-<index>` (built in `OverlayBackground.handleOverlayCiphersUpdate`), and when the user clicks an item, only that id travels back; the background looks up the real `CipherView` itself in `fillInlineMenuCipher`. As I read `buildCipherData`, neither the real cipher id nor the password is part of the data sent into the page-side layers.
+- **No sensitive data in the page's reach**: the iframe receives cipher *display* data with synthetic ids of the form `inline-menu-cipher-<index>` (stored in `inlineMenuCiphers` by `OverlayBackground.handleOverlayCiphersUpdate`). When the user clicks an item, only that id travels back, and the background looks up the real `CipherView` itself in `fillInlineMenuCipher`. `buildCipherData` sends the following:
+  - name, type, `reprompt`, `favorite`, and icon;
+  - for logins, the username, the *current* TOTP code, and passkey labels;
+  - for cards, the card subtitle;
+  - for identities, a name and username.
+
+  Neither the real cipher id nor the password is sent. This data passes through Bitwarden's content script, which page script cannot read, on its way into the extension-origin iframes.
 
 ### Message authentication across the layers
 
