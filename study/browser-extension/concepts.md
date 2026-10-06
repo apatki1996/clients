@@ -629,7 +629,7 @@ In the repo this is the main weapon against being covered by a page:
         globalThis.window.alert(warningMessage);
 ```
 
-(`checkAndUpdateRefreshCount`.) Limits are in `experienceValidationBackoffThresholds` at the top of the file: top layer count 5 per 5000 ms, popover attribute count 10 per 5000 ms.
+(`checkAndUpdateRefreshCount`.) Limits are in `experienceValidationBackoffThresholds` at the top of the file: a count limit of 5 for top-layer re-promotions and 10 for popover-attribute resets, each within a 5000 ms window. Once disabled this way, the menu stays off for that page (`inlineMenuEnabled = false`), and the user sees the `topLayerHijackWarning` alert.
 
 ### CSS stacking, z-index, opacity, `pointer-events`
 
@@ -647,16 +647,21 @@ In the repo this is the main weapon against being covered by a page:
       const opacityThreshold = 0.6;
 ```
 
-(`getPageIsOpaque`; if any of `html`/`body` is at or below 0.6 the menu is closed in `checkPageRisks`.)
-- **Visibility checks for target fields.** `DomElementVisibilityService.isElementHiddenByCss` (`apps/browser/src/autofill/services/dom-element-visibility.service.ts`) rejects a field when its own opacity or any ancestor's opacity is below 0.1, when it has `display: none`, `visibility: hidden`/`collapse`, or a clip-path that hides it, and `isElementOutsideViewportBounds` rejects fields smaller than 10 px or off-screen. `formFieldIsNotHiddenBehindAnotherElement` uses `elementFromPoint` at the field's center, so a field covered by another element is not "viewable".
-- **Another element covering the menu.** `verifyInlineMenuIsNotObscured` uses `document.elementFromPoint` at the center of the menu and closes it if the topmost element is a foreign last child of the container.
-- **`pointer-events`.** The iframes set `pointerEvents: "auto"` explicitly as part of their reset styles, and the pseudo-element reset in `autofill-inline-menu-iframe-element.ts` sets `pointer-events: all !important` on `::backdrop/::before/::after`, so a page cannot style those pseudo-elements to interfere. I did not find code that reads the page's `pointer-events` values.
+(`getPageIsOpaque`; if the computed opacity of `html` or `body` is at or below 0.6, `checkPageRisks` closes the menu. The method's own `@TODO` notes that elements between `html` and `body`, or other ancestors, are not checked.)
+- **Visibility checks for target fields.** `DomElementVisibilityService.isElementHiddenByCss` (`apps/browser/src/autofill/services/dom-element-visibility.service.ts`) rejects a field in these cases:
+  - its own opacity, or any ancestor's opacity up to (not including) `<html>`, is below 0.1;
+  - it has `display: none` or `visibility: hidden`/`collapse`;
+  - it has a clip-path that hides it.
+
+  `isElementOutsideViewportBounds` rejects fields smaller than 10 px, or ones that extend outside the document's scrollable area. `formFieldIsNotHiddenBehindAnotherElement` uses `elementFromPoint` at the field's center, so a field covered by another element (other than its own label or Bitwarden's menu) is not "viewable". One exception: fields selected by fill-assist targeting rules are marked `viewable = true` regardless (`collect-autofill-content.service.ts`, comment "Targeting rules may deliberately select hidden fields").
+- **Another element covering the menu.** If a foreign element keeps forcing itself to be the container's last child (3 or more times), `handlePersistentLastChildOverride` lowers its inline `z-index` if it was at the maximum. After 500 ms, `verifyInlineMenuIsNotObscured` runs `document.elementFromPoint` at the center of the button and of the list, and closes the menu if that element is the intruder.
+- **`pointer-events` and pseudo-elements.** The iframes set `pointerEvents: "auto"` explicitly as part of their reset styles. The `<style>` node that `autofill-inline-menu-iframe-element.ts` puts inside the closed shadow root targets `:host::backdrop`, `:host::before` and `:host::after`. It forces them to `display: none !important`, along with `opacity: 1`, no filters, no transforms, and `pointer-events: all`, all `!important`. **Platform fact:** for `!important` declarations, a shadow tree's `:host` rules beat the outer page's rules, so a page cannot use those pseudo-elements on the host to paint a decoy over the menu. I did not find code that reads the page's `pointer-events` values.
 
 The 2025 DOM clickjacking issue is covered separately in [`vuln-2025-dom-clickjacking.md`](./vuln-2025-dom-clickjacking.md). Many of the defenses above exist to counter it.
 
 ## A11. `BrowserApi` and cross-browser differences
 
-`apps/browser/CLAUDE.md` makes this a rule: **never call `chrome.*` or `browser.*` directly in business logic; use `BrowserApi`** (`apps/browser/src/platform/browser/browser-api.ts`). The exception is injected content scripts (`.claude/rules/autofill-content-scripts.md`: "Content scripts cannot import the `BrowserApi` abstraction ... direct use of `chrome.*` / `browser.*` APIs ... is expected here").
+`apps/browser/CLAUDE.md` makes this a rule: **never call `chrome.*` or `browser.*` directly in business logic; use `BrowserApi`** (`apps/browser/src/platform/browser/browser-api.ts`). The exception is injected content scripts (`.claude/rules/autofill-content-scripts.md`: "Content scripts cannot import the `BrowserApi` abstraction required elsewhere in the browser extension" and "Direct use of `chrome.*` / `browser.*` APIs (e.g., `chrome.runtime.sendMessage`) is expected here").
 
 What `BrowserApi` provides:
 
@@ -680,8 +685,8 @@ Other cross-browser differences visible in code:
 
 | Area | Firefox | Chrome-family | Safari |
 | --- | --- | --- | --- |
-| Manifest | MV3 `background.scripts` (`__firefox__background`); MV2 builds exist | MV3 service worker | MV2 and MV3 build targets; Safari-specific permission list |
-| Offscreen document | Not built (`browser !== "firefox"`) | Built for MV3 | `offscreen` is in the Safari MV3 permissions list; I did not verify what Safari does with it |
+| Manifest | Production ships MV2 (persistent background page). The MV3 build uses `background.scripts` (`__firefox__background`) and is marked not for production (A1) | MV3 service worker | Production ships MV2; an MV3 build target exists. Safari-specific permission lists |
+| Offscreen document | Not built (`browser !== "firefox"`) | Built and used for MV3 | Built for the MV3 target, and `offscreen` is in its permission list. Clipboard never uses it on Safari, though: `BrowserPlatformUtilsService` sends clipboard reads and writes to the native app (`SafariApp.sendMessageToApp`). Any other use happens only if `chrome.offscreen` exists at runtime |
 | Sandbox pages in manifest | Removed (`__firefox__sandbox: null`) | Present | Present |
 | Closed shadow root access | `node.openOrClosedShadowRoot` | `chrome.dom.openOrClosedShadowRoot(node)` | not checked; any browser without `chrome.dom` falls through to `node.openOrClosedShadowRoot` (`dom-query.service.ts`) |
 | Inline menu host element | Plain `div` (`isFirefoxBrowser`) | Random custom element | Random custom element |
