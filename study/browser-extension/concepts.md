@@ -119,7 +119,7 @@ Why they matter for reading the code:
     }
 ```
 
-(`apps/browser/src/manifest.v3.json`.) The first entry is `content/content-message-handler.js` with `"all_frames": false` (top frame only). Both entry points are tiny. The "trigger" script's whole job is:
+(`apps/browser/src/manifest.v3.json`.) The first entry is `content/content-message-handler.js` with `"all_frames": false` (top frame only), the web-vault bridge described in A8.6. The "trigger" script is tiny; its whole job is:
 
 ```ts
 (function () {
@@ -388,9 +388,9 @@ The repo has an internal abstraction: `MessageSender` and `MessageListener` in `
       .pipe(filter((message) => !isExternalMessage(message)))
 ```
 
-(`apps/browser/src/autofill/background/overlay.background.ts`, `setupExtensionListeners`.) A message that should only come from inside the background is accepted only when it arrived over the in-process channel.
+(`apps/browser/src/autofill/background/overlay.background.ts`, `setupExtensionListeners`.) Every message that comes in through `chrome.runtime.onMessage` is tagged at ingest. So a message that should only come from inside the background is accepted only when it carries no external tag, which in practice means it was published on the in-process channel.
 
-Two lint rules push developers toward these abstractions: `**/platform/messaging/**` and `**/platform/**/internal` are forbidden import patterns in `eslint.config.mjs` (`buildNoRestrictedImports`), which is why you see `// eslint-disable-next-line no-restricted-imports` before imports of `tagAsExternal` and `getCommand`.
+Lint pushes developers toward these abstractions: `**/platform/messaging/**` and `**/platform/**/internal` are forbidden import patterns in the `no-restricted-imports` rule that `buildNoRestrictedImports` builds in `eslint.config.mjs`, which is why you see `// eslint-disable-next-line no-restricted-imports` before imports of `tagAsExternal` and `getCommand`.
 
 ### A8.3 Checking who sent it: `senderIsInternal`
 
@@ -635,7 +635,7 @@ In the repo this is the main weapon against being covered by a page:
 
 **Platform fact:** `z-index` orders positioned elements within a stacking context; `opacity` below 1 creates a stacking context and makes the element and all descendants translucent; `pointer-events: none` makes an element ignore clicks so they hit whatever is beneath it.
 
-- The extension's host elements use the maximum 32-bit `z-index`: `zIndex: "2147483647"` in `customElementDefaultStyles` (content service) and in the iframe's `iframeStyles` (iframe service), together with `all: "initial"` and `position: "fixed"` to reset inherited page styles.
+- The extension's host elements use the maximum 32-bit `z-index`: `zIndex: "2147483647"` in `customElementDefaultStyles` (content service) and in the iframe's `iframeStyles` (iframe service), together with `all: "initial"` and `position: "fixed"` to reset inherited page styles. While the host is shown as a popover, it is in the top layer, where `z-index` is ignored. The maximum `z-index` matters for ordering only outside the top layer.
 - **Opacity risk.** Because opacity applies to descendants, a transparent `<html>` or `<body>` would make the menu invisible while still clickable, a UI-redressing building block. The content service checks it:
 
 ```ts
@@ -702,7 +702,7 @@ Other cross-browser differences visible in code:
 From `.claude/CLAUDE.md`:
 
 - `apps/<client>/`: single-client code (`browser`, `cli`, `desktop`, `web`). Each is self-contained.
-- `libs/common/`: shared by **all** clients including the non-Angular CLI. "No Angular APIs here: no `@Injectable`, no `inject()`, no decorators."
+- `libs/common/`: shared by **all** clients including the non-Angular CLI. "No Angular APIs here: no `@Injectable`, no `inject()`, no decorators, no template references."
 - `libs/angular/`: shared by Angular clients (browser, desktop, web). Angular is allowed.
 - Other libs (`ui`, `platform`, `key-management`, `vault`, `state`, `messaging`, `unlock`, and so on) are domain-scoped and follow the same Angular or non-Angular split.
 - `bitwarden_license/` holds commercial variants (for example `bit-browser`, and the `commercial-*` build targets in `apps/browser/project.json`).
@@ -1032,7 +1032,7 @@ The content script replies with a **`collectPageDetailsResponse`** runtime messa
 - `command`: the login keyboard shortcut;
 - `cipherType`: the card and identity shortcuts.
 
-The popup, inline menu, and context menu call `AutofillService.doAutoFill` directly, without going through the orchestrator. The design doc explains why: it keeps "two fills from racing on a single frame — a race that could fill twice, or, if the page navigated between collecting its details and dispatching the fill, place a credential chosen for the old page onto the new one" (`autofill.design.md`).
+The design doc explains the serialization: it keeps "two fills from racing on a single frame — a race that could fill twice, or, if the page navigated between collecting its details and dispatching the fill, place a credential chosen for the old page onto the new one" (`autofill.design.md`). The popup, inline menu, and context menu call `AutofillService.doAutoFill` directly, without going through the orchestrator.
 
 The orchestrator calls into `AutofillService` (`apps/browser/src/autofill/services/autofill.service.ts`):
 
@@ -1138,7 +1138,7 @@ The comparison against a saved URI with no scheme still works for `Domain` and `
 - `validHosts` is `["localhost"]`; `localhost` and IP addresses are returned as-is.
 - `data:` and `about:` URIs return `null`, so `Domain` never matches them.
 - `allowPrivateDomains: true` makes tldts treat private-section PSL entries as public suffixes. So `alice.github.io` and `bob.github.io` have different registrable domains, and a login saved for one does not match the other under `Domain`. Without that option, both would reduce to `github.io` and match each other. This is the library's documented option behavior; I did not run it in this environment.
-- `Utils.DomainMatchBlacklist = new Map([["google.com", new Set(["script.google.com"])]])`, used in `matchesDomain`: even if the domain matches, `script.google.com` is excluded for a `google.com` login, because `script.google.com` hosts user-controlled content.
+- `Utils.DomainMatchBlacklist = new Map([["google.com", new Set(["script.google.com"])]])`, used in `matchesDomain`: even if the domain matches, `script.google.com` is excluded for a `google.com` login. The code gives no reason. The likely one is that `script.google.com` serves user-written Google Apps Script content, but that is my inference.
 - `matchesDomain` normalizes punycode and Unicode forms before comparing (`punycodeToUnicode` in `libs/common/src/autofill/utils/punycode.ts`), so an internationalized domain saved as Unicode matches its punycode (`xn--...`) form. This is a correctness feature; it also shows why homograph/lookalike domains are a concern, as each distinct string is a different domain.
 
 ### Equivalent domains
@@ -1216,7 +1216,7 @@ I could not find a comment explaining the choice of two nested extension iframes
 
 ### Why it is built this way
 
-- **Isolation from page scripts**: A page cannot read inside a cross-origin iframe or a closed shadow root, so it cannot read cipher names, usernames, or TOTP codes shown in the menu (`buildCipherData` in `overlay.background.ts` sends the iframe `name`, `username`, TOTP code, favicon, and so on, but not the password, as I read the code).
+- **Isolation from page scripts**: A page cannot read inside a cross-origin iframe or a closed shadow root, so it cannot read the cipher names, usernames, or TOTP codes shown in the menu (the exact fields are listed below).
 - **Isolation from page CSS**: page style rules do not reach inside a shadow root or an iframe. Inherited properties and rules aimed at the host itself still do, so the host element resets with `all: "initial"` and the shadow root carries `!important` pseudo-element rules (`autofill-inline-menu-iframe-element.ts`).
 - **Resistance to being covered or hidden**: top layer, max z-index, `getPageIsOpaque`, `elementFromPoint` checks, and mutation observers (A10).
 - **No sensitive data in the page's reach**: the iframe receives cipher *display* data with synthetic ids of the form `inline-menu-cipher-<index>` (stored in `inlineMenuCiphers` by `OverlayBackground.handleOverlayCiphersUpdate`). When the user clicks an item, only that id travels back, and the background looks up the real `CipherView` itself in `fillInlineMenuCipher`. `buildCipherData` sends the following:
@@ -1233,7 +1233,7 @@ Messages inside the stack (container, `autofill-inline-menu-container.ts`):
 
 - Rejects any window message that has no `portKey` field, or that comes from neither the parent window nor the one iframe it created (`isForeignWindowMessage`). The container only checks that a `portKey` is *present*. The background checks its *value* (A8.4).
 - Accepts the `initAutofillInlineMenu*` message only from the extension origin or its parent window (`isMessageFromExtensionOrigin`, `isMessageFromParentWindow`), and only once (`isInitialized`).
-- Treats other messages from the parent window as trusted and forwards them to the inner iframe with the token added. Keep the platform fact from A8.6 in mind here: the parent window is the web page's window, so "from the parent" covers both Bitwarden's content script and the page's own scripts. The security of this hop rests on what can reach the background: only allowlisted commands, from the inner iframe, carrying the right port key.
+- Treats other messages from the parent window as trusted and forwards them to the inner iframe with the token added. Keep the platform fact from A8.6 in mind here: the parent window is the web page's window, so "from the parent" covers both Bitwarden's content script and the page's own scripts (provided the page can get a reference to the container's window). "From the parent" is therefore not proof of who sent a message. What protects the background is the next layer: only allowlisted commands are forwarded, and the background still requires the right port key.
 - Identifies the inner iframe by **object identity**, `this.inlineMenuPageIframe.contentWindow === event.source`, and requires a **session token** generated per container instance: `this.token = generateRandomChars(32)`. The token reaches the inner page inside the init message.
 - Forwards to the background only commands in an allowlist:
 
@@ -1252,13 +1252,21 @@ const ALLOWED_BG_COMMANDS = new Set<string>([
 - Validates that URLs it is told to load are extension URLs under the expected origin (`isExtensionUrlWithOrigin` checks the protocol is `chrome-extension:`, `moz-extension:`, or `safari-web-extension:`). Note that the expected origin is `message.extensionOrigin` when the init message supplies one, and otherwise the container's own origin.
 - Posts to its inner iframe with target origin `"*"`. **Platform fact:** a `postMessage` target origin cannot name an opaque origin, so `"*"` is the only way to address a sandboxed child. Both send paths use `"*"`. The method named `postMessageToInlineMenuPageUnsafe` is "unsafe" for a different reason: per its doc comment, it "Bypasses token authentication and sends raw messages". It is used for the init message, which is how the token is delivered. The normal path, `postMessageToInlineMenuPage`, adds the token. On this hop, the container relies on holding the `contentWindow` reference itself, and on the token.
 
-The innermost page (`autofill-inline-menu-page-element.ts`) only accepts messages from `globalThis.parent`, pins `messageOrigin` to the first parent message's origin, ignores events from other origins, and refuses to post to its parent without a token and an established origin ("never send messages containing authentication tokens without a valid token and an established messageOrigin"). The background then re-checks `portKey` against the tab (A8.4).
+The innermost page (`autofill-inline-menu-page-element.ts`) does the following:
+
+- It only accepts messages from `globalThis.parent`.
+- It pins `messageOrigin` to the first parent message's origin and ignores events from other origins. Since its parent is the container, that is the extension origin.
+- It adopts the token from the init message, and afterwards rejects any message without that token.
+- It refuses to post to its parent without a token and an established origin ("never send messages containing authentication tokens without a valid token and an established messageOrigin").
+- It ignores untrusted keyboard events.
+
+The background then re-checks `portKey` against the tab (A8.4).
 
 ## C5. Security safeguards to know
 
 ### Untrusted and cross-origin iframes
 
-The background marks a fill script `untrustedIframe` when the frame's URL does not match the saved login:
+The background marks a fill script `untrustedIframe` when the URL of the frame being filled (`pageDetails.url`, from that frame's content script) differs from the tab URL *and* does not match any of the login's saved URIs. The match uses the same rules as C2: the frame's own equivalent domains and the default strategy. The flag is computed only for **Login** ciphers, in `generateLoginFillScript` and in `generateTargetedFillScript` (except for a not-yet-saved generated-password cipher). Card, identity, and SSH key fill scripts never set it.
 
 ```ts
     if (pageUrl === options.tabUrl) {
@@ -1286,13 +1294,26 @@ The background marks a fill script `untrustedIframe` when the frame's URL does n
         }
 ```
 
-(`doAutoFill`.) Page-load fills pass `allowUntrustedIframe: fromCommand`, i.e. `false`, so they are silently blocked. User-initiated paths (shortcut passes `true`; popup and inline menu leave it undefined) are not blocked in the background, but the content script **asks the user**:
+(`doAutoFill`.) The log message says "page load" because only the page-load path passes `false`. Per trigger:
+
+| Trigger | `allowUntrustedIframe` | Result for an untrusted frame |
+| --- | --- | --- |
+| Autofill on page load | `false` (`fromCommand`) | Silently skipped in the background; never reaches the frame |
+| Keyboard shortcut (login) | `true` (`fromCommand`) | Sent; the content script asks the user to confirm |
+| Auto-submit login | `true` (`doAutoFillOnTab(..., true, true)`) | Sent; the content script asks the user to confirm |
+| Popup, inline menu, context menu | not set (`undefined`) | Sent; the content script asks the user to confirm |
+| Any card, identity, or SSH key fill (any trigger, including the card/identity shortcuts) | any | The flag is never set for these cipher types, so there is no iframe check or prompt |
+
+When the script is sent, the content script **asks the user**:
 
 ```ts
     return !globalThis.confirm(confirmationWarning);
 ```
 
-(`InsertAutofillContentService.userCancelledUntrustedIframeAutofill`.) The code comment notes `confirm()` "is blocked by sandboxed iframes, but we don't want to fill sandboxed iframes anyway", and `fillForm` already refuses sandboxed iframes with `currentlyInSandboxedIframe()`. The text shown to the user comes from the locale string `autofillIframeWarning`: "The form is hosted by a different domain than the URI of your saved login. Choose OK to autofill anyway, or Cancel to stop." (`apps/browser/src/_locales/en/messages.json`.)
+(`InsertAutofillContentService.userCancelledUntrustedIframeAutofill`.) The code comment notes `confirm()` "is blocked by sandboxed iframes, but we don't want to fill sandboxed iframes anyway", and `fillForm` already refuses sandboxed iframes with `currentlyInSandboxedIframe()`. The text shown to the user comes from the locale string `autofillIframeWarning`: "The form is hosted by a different domain than the URI of your saved login. Choose OK to autofill anyway, or Cancel to stop." It is followed by `autofillIframeWarningTip`, which suggests saving the frame's hostname to the login (`apps/browser/src/_locales/en/messages.json`). Two details:
+
+- The prompt is the frame's own `window.confirm`, shown by Bitwarden's content script running in that frame.
+- `pageUrl === tabUrl` short-circuits to "trusted". So a frame whose URL is exactly the tab's URL is never flagged, as the doc comment intends.
 
 ### HTTP vs HTTPS warning
 
@@ -1306,7 +1327,13 @@ The background marks a fill script `untrustedIframe` when the frame's URL does n
     }
 ```
 
-(`InsertAutofillContentService.userCancelledInsecureUrlAutofill`.) It prompts only when: a saved URL for this hostname starts with `https://`, but the current page is `http:`, and there is a password field in the document. Then `confirm()` shows the `insecurePageWarning` strings ("This Login was originally saved on a secure (HTTPS) page."). Note the scope: a login saved only as `http://...` does not trigger the warning (my reading of the condition).
+(`InsertAutofillContentService.userCancelledInsecureUrlAutofill`.) It prompts only when all three hold:
+
+- some saved URL starts with `https://<this hostname>` (a plain string prefix);
+- the current page is `http:`;
+- there is a password field in the document.
+
+Then `confirm()` shows the `insecurePageWarning` text ("Warning: This is an unsecured HTTP page, ... This Login was originally saved on a secure (HTTPS) page.") followed by `insecurePageWarningFillPrompt` ("Do you still wish to fill this login?"). Note the scope. A login saved only as `http://...` does not trigger the warning. Card and identity fills never do either, because `savedUrls` is only set for login fill scripts. This prompt exists because `Domain` and `Host` matching ignore the scheme (C2).
 
 ### Password reprompt
 
@@ -1322,13 +1349,15 @@ export const CipherRepromptType = {
 (`libs/common/src/vault/enums/cipher-reprompt-type.ts`.) Enforcement in `AutofillService`:
 
 - `doAutoFillOnTab` returns `{ didAutofill: false }` when `cipher.reprompt === CipherRepromptType.Password && !fromCommand`. In other words, a page-load fill never fills reprompt-protected items.
-- `isPasswordRepromptRequired(cipher, tab)`: if `cipher.reprompt === Password` and the user has a master password, it opens the reprompt popout (debounced) and returns `true`, so the fill is not performed.
-- The inline menu (`fillInlineMenuCipher`), context menu (`ContextMenuClickedHandler`), and popup (`_internalDoAutofill` calls `passwordRepromptService.showPasswordPrompt()`) each check it too. The inline menu also receives `reprompt` in its cipher data so it can display the state.
+- `isPasswordRepromptRequired(cipher, tab)`: if `cipher.reprompt === Password` and the user has a master password, it opens the reprompt popout (debounced) and returns `true`, so the fill is not performed now. The popout carries the cipher id and an action, so the fill can happen after the user re-verifies.
+- The inline menu (`fillInlineMenuCipher`, via `isPasswordRepromptRequired`), context menu (`ContextMenuClickedHandler`, its own `isPasswordRepromptRequired`), and popup (`_internalDoAutofill` calls `passwordRepromptService.showPasswordPrompt()`) each check it too. The inline menu also receives `reprompt` in its cipher data so it can display the state.
+
+What reprompt is and is not, as the code shows it: it is a **client-side confirmation gate**, not an extra layer of encryption. The `CipherView` is already decrypted in memory when the check runs, and the check only decides whether the extension will use it. It applies only to users who have a master password. Both `isPasswordRepromptRequired` and `PasswordRepromptService.showPasswordPrompt` (`libs/vault/src/services/password-reprompt.service.ts`) let the action through when the user has none, for example an SSO-only account.
 
 ### User-gesture and visibility checks
 
-- **Trusted events only** (`event.isTrusted`) on every inline-menu action and form-submit capture (A7).
-- **Visibility**: `viewable` fields only (A10), and `generateFillScript` skips fields where `!field.viewable && field.tagName !== "span"`.
+- **Trusted events only** (`event.isTrusted`) on inline-menu clicks and key handling and on the form-submit capture (A7). Remember the limit: this proves real input, not informed intent.
+- **Visibility**: `generateFillScript` skips custom-field matches where `!field.viewable && field.tagName !== "span"`, and the login, card, and identity paths apply similar viewability filters. Fields chosen by fill-assist targeting rules count as viewable by design (A10).
 - **Page risk checks** close the inline menu if `html` or `body` is translucent, or the page keeps fighting for the top layer (A10).
 - **User gesture for side panel**: comment in the context menu handler (A6).
 - **Committed tab only**: fills land only on the tab the user is working in (`autofill.design.md`, "Autofill and the monitoring lifecycle").
@@ -1339,16 +1368,16 @@ export const CipherRepromptType = {
 - `fillForm` re-checks `location.href === pageDetailsUrl` (C1).
 - `senderHasValidTab` and `withSenderTab` in `overlay.background.ts` (A8.1).
 - Inline-menu messages are tied to the focused field's tab and frame: `senderTabHasFocusedField` and `senderFrameHasFocusedField` compare `sender.tab?.id` and `sender.frameId` against `focusedFieldData` (`apps/browser/src/autofill/background/overlay.background.ts`).
-- The inline-menu cipher cache is only (re)built while the vault is `Unlocked` (`updateOverlayCiphers` checks `AuthenticationStatus.Unlocked` before populating); on lock the extension process is reloaded (B4). I did not trace every place the cache is cleared.
+- The inline-menu cipher cache is only (re)built while the vault is `Unlocked` (`updateOverlayCiphers` checks `AuthenticationStatus.Unlocked` before resetting and repopulating it). On lock, the extension process is reloaded once no account is unlocked (B4). I did not trace every place the cache is cleared.
 - Blocked domains: `BrowserScriptInjectorService.findBlockedInjectionUrl` prevents injecting scripts into the user's blocked pages and sub-frames.
 
 ## C6. Vulnerability history (short)
 
-- **Iframe autofill (CVE-2018-25081 per the companion doc filename).** A page that matches a saved login could embed a different-origin form that received the credential. The safeguard you can read today is the `untrustedIframe` flow above. See [`vuln-cve-2018-25081-iframe-autofill.md`](./vuln-cve-2018-25081-iframe-autofill.md).
-- **2025 DOM-based extension clickjacking.** A malicious page manipulates the visibility, opacity, or position of the extension's injected UI so that a user's click triggers an autofill they did not intend. The defenses in `autofill-inline-menu-content.service.ts` and `autofill-inline-menu-iframe.service.ts` (A10, C4) are the relevant code. See [`vuln-2025-dom-clickjacking.md`](./vuln-2025-dom-clickjacking.md).
+- **Iframe autofill (CVE-2018-25081).** A page that matches a saved login could embed a different-origin form that received the credential. The safeguard you can read today is the `untrustedIframe` flow above. See [`vuln-cve-2018-25081-iframe-autofill.md`](./vuln-cve-2018-25081-iframe-autofill.md).
+- **2025 DOM-based extension clickjacking** (presented by Marek Toth at DEF CON 33, per the companion note). A malicious page manipulates the visibility, opacity, or position of the extension's injected UI so that a user's click triggers an autofill they did not intend. The defenses in `autofill-inline-menu-content.service.ts` and `autofill-inline-menu-iframe.service.ts` (A10, C4) are the relevant code. See [`vuln-2025-dom-clickjacking.md`](./vuln-2025-dom-clickjacking.md).
 - `fido2-content-script.ts` mentions "VULN-582 / VULN-398" for the Permissions Policy attacker model; I did not find more detail in the repo.
 
-I have not independently verified the details of either named vulnerability; read the companion files for those.
+These one-line summaries agree with the companion files. The external details (dates, reporters, affected versions) are in those files, which mark which parts they could not verify.
 
 ---
 
@@ -1359,12 +1388,12 @@ Short, and tied to the code where I can.
 **Threat model of a password-manager extension.** Think in terms of who can run code or influence what, and what they want (secrets, or a trick that makes the user or extension hand secrets over).
 
 - *Malicious web page.* Controls all page JavaScript in the main world, the DOM, CSS, and the page's iframes. Goals: read filled credentials, trigger a fill into its own form, cover or fake the UI to induce a click (clickjacking), forge messages to the extension. Defenses: isolated world, closed shadow DOM, extension-origin iframes, URL matching, untrusted-iframe prompts, `isTrusted` checks, sender and token checks (Parts A and C). Limit: once a legitimately matched page receives a fill, its scripts can read the DOM values; no extension can prevent that.
-- *Compromised or malicious sub-frame.* An iframe from another origin inside a legitimate page, for example an ad or widget. Goal: get a credential chosen for the parent page. Defense: per-frame fill targeting and the `untrustedIframe` flag (A9, C5). Also, content scripts treat `sender.frameId` from the browser as authoritative.
+- *Compromised or malicious sub-frame.* An iframe from another origin inside a legitimate page, for example an ad or widget. Goal: get a credential chosen for the parent page. Defense: per-frame fill targeting and the `untrustedIframe` flag (A9, C5). Page-load fills skip such frames, and user-initiated login fills ask for confirmation. Also, the background treats the browser-supplied `sender.frameId` as authoritative.
 - *Malicious other extension.* Can run its own content scripts in the same page and see the same DOM, but not Bitwarden's isolated world. It could observe filled values in the DOM and could try to interfere with the injected UI. In this repo there is no `externally_connectable` key and no `onMessageExternal` listener, and the messaging layer tags and stamps messages (A8.2). I'm describing what the code registers, not making a claim about every browser's cross-extension behavior.
-- *Local attacker.* Someone with access to the machine or profile. Defenses: the user key is only in memory while unlocked (`USER_KEY` is `CRYPTO_MEMORY`, cleared on lock), lock reloads the extension process, vault timeout, and the clipboard clearing (`systemService.clearClipboard` / `clearPendingClipboard`). Limit: a `MainBackground` comment says secure storage "is not supported in browsers, so we use local storage and warn users when it is used", so anything the extension keeps for convenience unlock sits in ordinary extension storage. I did not audit exactly what is stored there.
+- *Local attacker.* Someone with access to the machine or profile. Defenses: the user key is held only in `"memory"` state while unlocked. `USER_KEY` is in `CRYPTO_MEMORY` and cleared on lock; in MV3 that state is `chrome.storage.session`, which Chrome keeps in memory. Lock also reloads the extension process, vault timeout, and the clipboard clearing (`systemService.clearClipboard` / `clearPendingClipboard`). Limit: a `MainBackground` comment says secure storage "is not supported in browsers, so we use local storage and warn users when it is used", so anything the extension keeps for convenience unlock sits in ordinary extension storage. I did not audit exactly what is stored there.
 - *Network attacker and malicious server.* Mitigated mostly by TLS and the zero-knowledge design: the server holds only encrypted vault data and an authentication hash, not the user key.
 
-**XSS (cross-site scripting).** Injecting attacker script into a page that then runs with the page's privileges. In the extension it matters because extension pages have strong powers. Defenses visible here: extension-page CSP `script-src 'self'` (A5), Angular templates in the popup, and in-page UI code that assigns `innerHTML` only to clear (`""`) and uses `textContent` for text (`autofill-inline-menu-list.ts`; `autofill-inline-menu-button.ts` also clears with `innerHTML = ""`). A search of the autofill folder (non-test code) found no `innerHTML` assignment of data. Also, page-controlled strings (field names, labels) are only classified, not evaluated.
+**XSS (cross-site scripting).** Injecting attacker script into a page that then runs with the page's privileges. In the extension it matters because extension pages have strong powers. Defenses visible here: extension-page CSP `script-src 'self'` (A5), Angular templates in the popup, and in-page UI code that assigns `innerHTML` only to clear (`""`) and uses `textContent` for text (`autofill-inline-menu-list.ts`; `autofill-inline-menu-button.ts` and `autofill-inline-menu-page-element.ts` also clear with `innerHTML = ""`). A search of the autofill folder (non-test code) found no `innerHTML` assignment of data, and no `insertAdjacentHTML` or Lit `unsafeHTML`. The only markup parser is `buildSvgDomElement` (`DOMParser` on SVG strings), and every caller passes a bundled icon constant or a literal. Also, page-controlled strings (field names, labels) are only classified, not evaluated.
 
 **Clickjacking.** Tricking a user into clicking something other than what they think they are clicking, usually by overlaying or hiding UI. Classic form: invisible iframe above a button. In extensions, the page can do the same to *extension-injected DOM* because it shares the page's DOM and CSS. Defenses: A10, C4.
 
@@ -1374,11 +1403,11 @@ Short, and tied to the code where I can.
 
 **CSP (Content Security Policy).** A header or manifest field restricting what resources a document can load or run. Two different uses in this repo: (1) the extension's own CSP (A5); (2) websites' CSPs, which the extension does not control. The MV2 FIDO2 path inserts a `<script src>` element into the page, which is a place where a page's own CSP could matter; I did not investigate how that case is handled.
 
-**Origin vs site.** An *origin* is scheme + host + port (`https://a.example.com:443`); the same-origin policy works on origins. A *site* is scheme + registrable domain (eTLD+1), roughly `https://example.com`, which groups subdomains. Bitwarden's `Domain` match strategy is a *site-like* comparison; `Host` and `Exact` are closer to origin-like. FIDO2 code uses `location.origin` (`respondToCredentialRequest`). The popup/extension origin comparison in `senderIsInternal` is an origin comparison (`urlOriginsMatch`).
+**Origin vs site.** An *origin* is scheme + host + port (`https://a.example.com:443`); the same-origin policy works on origins. A *site* is scheme + registrable domain (eTLD+1), roughly `https://example.com`, which groups subdomains. Bitwarden's `Domain` match strategy is *site-like*, but looser, because it ignores the scheme. `Host` compares hostname and port but also ignores the scheme, so it is not an origin comparison either. `Exact` compares the whole URL string, which is stricter than an origin. FIDO2 code uses `location.origin` (`respondToCredentialRequest`). The popup/extension origin comparison in `senderIsInternal` is an origin comparison (`urlOriginsMatch`).
 
 **Zero-knowledge encryption.** The service provider cannot read your data because encryption keys derive from a secret it never receives (the master password), and data leaves the client only encrypted. In this repo see B5. The practical consequence for engineers: any code path that sends decrypted vault data to an API breaks the model, hence the rule "**NEVER** send unencrypted vault data to API services".
 
-**Memory hygiene for secrets.** Minimize how long and where secrets live. Visible practices: the user key only in memory state cleared on lock and logout; extension process reload after lock (`BrowserProcessReloadService`); `cleanupDelayMs: 0` on key state so observables do not retain secrets; session-keyed encryption of persisted memory state (`LocalBackedSessionStorageService`); the clipboard auto-clear for copied passwords and TOTP; explicit `destroy()` of content-script services so decrypted display data does not linger (`AutofillInit.destroy`). JavaScript offers no reliable way to zero strings, which is one reason the heavy crypto lives in the Rust/WASM SDK. I did not inspect SDK memory handling.
+**Memory hygiene for secrets.** Minimize how long and where secrets live. Visible practices: the user key only in memory state (in MV3, `chrome.storage.session`) cleared on lock and logout; extension process reload after lock (`BrowserProcessReloadService`); `cleanupDelayMs: 0` on key state so observables do not retain secrets; session-keyed encryption of persisted memory state (`LocalBackedSessionStorageService`); the clipboard auto-clear for copied passwords and TOTP; explicit `destroy()` of content-script services so decrypted display data does not linger (`AutofillInit.destroy`). JavaScript offers no reliable way to zero strings, which is one reason the heavy crypto lives in the Rust/WASM SDK. I did not inspect SDK memory handling.
 
 **The CLAUDE.md rules.** In `.claude/CLAUDE.md`:
 
@@ -1418,15 +1447,11 @@ A path that builds understanding from the outside in. Spend most of your time on
 
 Things I could not confirm from the code, or that you should double check before relying on them in an interview:
 
-1. **Companion docs.** `vuln-cve-2018-25081-iframe-autofill.md` and `vuln-2025-dom-clickjacking.md` were not present in `study/browser-extension/` when I wrote this, so I could not check my short summaries in C6 against them.
-2. **Firefox MV3 background lifetime.** The MV3 manifest gives Firefox `background.scripts`. The lifecycle design doc describes Firefox as "Manifest V2 with a persistent background page". I did not verify how Firefox treats the MV3 `scripts` background (whether persistent or event-driven).
-3. **`use_dynamic_url` and `credentialless`.** The repo sets both but I found no comment explaining them. My descriptions are general knowledge or just "the code sets this".
-4. **Why the inline menu has two nested extension iframes.** The broker/renderer explanation in C4 is my inference from reading the code. I found no documentation of the intent.
-5. **`wasm-unsafe-eval` rationale.** Inferred from the SDK WASM loader; not stated in a comment.
-6. **Which Chrome feature motivates `minimum_chrome_version: 134.0`.** `apps/browser/webpack.base.js` has a comment near line 152 I only skimmed.
-7. **Safari.** The Safari MV3 permission list includes `offscreen`; I did not trace how Safari builds use it. The Safari build artifacts are under `apps/browser/src/safari/` (Xcode projects), which I did not read.
-8. **SDK internals.** Encryption, decryption, and key derivation are in `@bitwarden/sdk-internal` (Rust). The key hierarchy in B5 is only what TypeScript types and comments show; the exact algorithms are not in this repo.
-9. **`safeProvider` import path** differs between the rule file (`@bitwarden/ui-common`) and `services.module.ts` (`@bitwarden/angular/platform/utils/safe-provider`); I did not check which is current.
-10. **Regex and `StartsWith` match risks** are my reading of how those strategies work, not documented vulnerabilities.
-11. **Platform facts** (isolated worlds, `isTrusted`, shadow DOM modes, top layer, PSL behavior, `storage.session`) are standard web and extension behavior as I understand it; I did not test them in a browser here.
-12. The repo is a snapshot with features (fill assist targeting rules, the autofill lifecycle service, the orchestrator, the Lit inline menu components flag) that you may not see in older public versions of Bitwarden. Rely on the code in this checkout.
+1. **Why the inline menu has two nested extension iframes.** The broker/renderer explanation in C4 is my inference from reading the code. I found no documentation of the intent. Likewise, no comment explains why `credentialless` is set on those iframes (C4 gives the platform behavior only).
+2. **`wasm-unsafe-eval` rationale.** Inferred from the SDK WASM loader; not stated in a comment.
+3. **Safari runtime behavior.** The build side is settled (A1, A11): production Safari is MV2, and on the MV3 target, clipboard goes to the native app. Whether Safari's MV3 runtime exposes `chrome.offscreen` at all, and what happens to the `OffscreenStorageService` backup store there, I did not determine. The Safari Xcode projects under `apps/browser/src/safari/` were not read.
+4. **SDK internals.** Encryption, decryption, and key derivation are in `@bitwarden/sdk-internal` (Rust). The key hierarchy in B5 is only what TypeScript types and comments show; the exact algorithms are not in this repo.
+5. **Regex and `StartsWith` match risks** are my reading of how those strategies work, not documented vulnerabilities. The same goes for the `UriMatchDefaults` `||` observation in B7: it is what the code does, but I did not find a test or ticket saying whether it is intended.
+6. **Platform facts** (isolated worlds, `isTrusted`, `postMessage` provenance, shadow DOM and CSS cascade rules, top layer, PSL and `tldts` behavior, `storage.session` lifetime, `use_dynamic_url`, `credentialless`, Firefox MV3 event pages, Angular's standalone default) are standard, documented web and extension behavior. They were not tested in a browser here.
+7. **Page CSP and the MV2 FIDO2 `<script src>`.** Whether a strict page CSP can block the `chrome-extension://` / `moz-extension://` script that the MV2 path inserts depends on browser-specific exemptions for extension resources. I did not investigate it.
+8. The repo is a snapshot with features (fill assist targeting rules, the autofill lifecycle service, the orchestrator, the Lit inline menu components flag) that you may not see in older public versions of Bitwarden. Rely on the code in this checkout.
