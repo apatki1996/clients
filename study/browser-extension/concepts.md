@@ -1231,9 +1231,10 @@ I could not find a comment explaining the choice of two nested extension iframes
 
 Messages inside the stack (container, `autofill-inline-menu-container.ts`):
 
-- Rejects any window message with no `portKey` or not from the parent window or the one iframe it created (`isForeignWindowMessage`).
-- Accepts the initial `initAutofillInlineMenu*` message only from the extension origin or its parent window (`isMessageFromExtensionOrigin`, `isMessageFromParentWindow`).
-- Identifies the inner iframe by **object identity**, `this.inlineMenuPageIframe.contentWindow === event.source`, and requires a **session token** generated per container instance: `this.token = generateRandomChars(32)`.
+- Rejects any window message that has no `portKey` field, or that comes from neither the parent window nor the one iframe it created (`isForeignWindowMessage`). The container only checks that a `portKey` is *present*. The background checks its *value* (A8.4).
+- Accepts the `initAutofillInlineMenu*` message only from the extension origin or its parent window (`isMessageFromExtensionOrigin`, `isMessageFromParentWindow`), and only once (`isInitialized`).
+- Treats other messages from the parent window as trusted and forwards them to the inner iframe with the token added. Keep the platform fact from A8.6 in mind here: the parent window is the web page's window, so "from the parent" covers both Bitwarden's content script and the page's own scripts. The security of this hop rests on what can reach the background: only allowlisted commands, from the inner iframe, carrying the right port key.
+- Identifies the inner iframe by **object identity**, `this.inlineMenuPageIframe.contentWindow === event.source`, and requires a **session token** generated per container instance: `this.token = generateRandomChars(32)`. The token reaches the inner page inside the init message.
 - Forwards to the background only commands in an allowlist:
 
 ```ts
@@ -1248,8 +1249,8 @@ const ALLOWED_BG_COMMANDS = new Set<string>([
 ]);
 ```
 
-- Validates that URLs it is told to load are extension URLs under the expected origin (`isExtensionUrlWithOrigin` checks the protocol is `chrome-extension:`, `moz-extension:`, or `safari-web-extension:`).
-- Posts to its own inner iframe with target origin `"*"` in a method literally named `postMessageToInlineMenuPageUnsafe`, presumably because the sandboxed child has an opaque origin that cannot be named as a target (my inference). The method's comment says it is for trusted messages, and the safe wrapper adds the session token. The container therefore relies on `contentWindow` identity and the token instead of a target origin on that hop.
+- Validates that URLs it is told to load are extension URLs under the expected origin (`isExtensionUrlWithOrigin` checks the protocol is `chrome-extension:`, `moz-extension:`, or `safari-web-extension:`). Note that the expected origin is `message.extensionOrigin` when the init message supplies one, and otherwise the container's own origin.
+- Posts to its inner iframe with target origin `"*"`. **Platform fact:** a `postMessage` target origin cannot name an opaque origin, so `"*"` is the only way to address a sandboxed child. Both send paths use `"*"`. The method named `postMessageToInlineMenuPageUnsafe` is "unsafe" for a different reason: per its doc comment, it "Bypasses token authentication and sends raw messages". It is used for the init message, which is how the token is delivered. The normal path, `postMessageToInlineMenuPage`, adds the token. On this hop, the container relies on holding the `contentWindow` reference itself, and on the token.
 
 The innermost page (`autofill-inline-menu-page-element.ts`) only accepts messages from `globalThis.parent`, pins `messageOrigin` to the first parent message's origin, ignores events from other origins, and refuses to post to its parent without a token and an established origin ("never send messages containing authentication tokens without a valid token and an established messageOrigin"). The background then re-checks `portKey` against the tab (A8.4).
 
