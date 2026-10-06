@@ -8,7 +8,7 @@ A study guide for someone preparing for a Bitwarden software engineering intervi
 - **"In the repo:"** marks a statement that comes from reading code. **"Platform fact:"** marks a general web or extension platform fact that is not specific to Bitwarden. I kept platform facts standard and conservative. If I could not confirm something from the code, the text says so, and the open questions are collected at the end in [Open questions and caveats](#open-questions-and-caveats).
 - Code excerpts are verbatim, at most 10 lines, and carry their file path. A line containing only `...` means lines were elided.
 - The repo is the only source of truth. Where this repo differs from what you may remember about the public Bitwarden clients (for example, the inline menu's nested sandboxed iframe, or the `AutofillOrchestrator`), trust the code and the design docs.
-- Two companion write-ups cover vulnerabilities in depth: [`vuln-cve-2018-25081-iframe-autofill.md`](./vuln-cve-2018-25081-iframe-autofill.md) and [`vuln-2025-dom-clickjacking.md`](./vuln-2025-dom-clickjacking.md). They did not exist yet in `study/browser-extension/` when I wrote this file, so those links may be dangling until they are added.
+- Two companion write-ups in this folder cover vulnerabilities in depth: [`vuln-cve-2018-25081-iframe-autofill.md`](./vuln-cve-2018-25081-iframe-autofill.md) and [`vuln-2025-dom-clickjacking.md`](./vuln-2025-dom-clickjacking.md).
 
 ### Table of contents
 
@@ -25,7 +25,7 @@ A study guide for someone preparing for a Bitwarden software engineering intervi
 
 ## A1. Manifest V2 vs Manifest V3
 
-**Platform fact:** An extension's `manifest.json` declares its name, permissions, scripts, UI entry points, and security policy. Manifest V2 (MV2) and Manifest V3 (MV3) are two versions of that format and of the extension runtime model. The biggest practical difference for Bitwarden: MV2 allows a persistent background page; MV3 replaces it with a service worker that the browser can stop and restart at will.
+**Platform fact:** An extension's `manifest.json` declares its name, permissions, scripts, UI entry points, and security policy. Manifest V2 (MV2) and Manifest V3 (MV3) are two versions of that format and of the extension runtime model. The biggest practical difference for Bitwarden: MV2 allows a persistent background page; MV3 does not. Chromium-based browsers (and Safari) run the MV3 background as a service worker that the browser can stop and restart at will. Firefox's MV3 instead runs `background.scripts` as a non-persistent "event page": it has a DOM, but Firefox can still unload it when idle. Either way, MV3 background code must expect to be torn down and restarted.
 
 **In the repo:** There are two manifest sources, and the build picks one.
 
@@ -56,11 +56,13 @@ A study guide for someone preparing for a Bitwarden software engineering intervi
 
 (`apps/browser/webpack.base.js`.) The npm and Nx targets in `apps/browser/project.json` set `MANIFEST_VERSION` and `BROWSER` per build target (for example `BROWSER=firefox MANIFEST_VERSION=2` for the `firefox-mv2-dev` target).
 
+**Which manifest actually ships.** In `apps/browser/package.json`, `build:chrome` and `build:edge` set `MANIFEST_VERSION=3`, but `build:firefox` and `build:safari` set no version, so they fall back to MV2. The release workflow `.github/workflows/build-browser.yml` builds `dist:chrome`, `dist:edge` and `dist:opera:mv3` (MV3), `dist:firefox` (MV2), and `dist:safari` (MV2). It also builds a Firefox MV3 package, but names that artifact `DO-NOT-USE-FOR-PROD-dist-firefox-MV3`. So in this snapshot, Chrome, Edge and Opera ship MV3, while Firefox and Safari ship MV2. That matches the lifecycle design doc quoted in A6.
+
 ### Per-browser key prefixes
 
 `apps/browser/webpack/manifest.js` implements a small convention: a key prefixed with `__<browser>__` overrides or removes the unprefixed key for that browser, and keys for other browsers are dropped. A `null` value deletes the key. Examples from the manifests:
 
-- `"__firefox__background": { "scripts": ["background.js"] }` in `manifest.v3.json`. Firefox gets background scripts, other browsers get the service worker.
+- `"__firefox__background": { "scripts": ["background.js"] }` in `manifest.v3.json`. Firefox MV3 builds get a background script (an event page), and other browsers get the service worker. `webpack.base.js` matches this by building the MV3 background with webpack `target: "web"` for Firefox and `"webworker"` for the others.
 - `"__firefox__sandbox": null` removes the `sandbox` key for Firefox.
 - `"__chrome__side_panel": { "default_path": "sidepanel-disabled.html" }` only exists in Chrome builds.
 - `"__safari__permissions"` and `"__firefox__permissions"` give those browsers their own permission lists.

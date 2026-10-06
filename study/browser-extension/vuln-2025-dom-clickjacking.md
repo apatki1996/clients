@@ -4,8 +4,8 @@ Study notes for interview prep. Source of truth is git history plus the current 
 
 How this was produced:
 
-- Upstream history: a full-history, blobless clone of `bitwarden/clients` (`git -C <bw-history> ...`). Current code: `/home/user/clients` at `5a00c60` (main, shallow).
-- External sources were only partly reachable. `marektoth.com`, `marektoth.cz`, `thehackernews.com`, `bleepingcomputer.com` and `socket.dev` were **blocked by the network proxy**, and GitHub PR pages could not be read (`gh pr view` is blocked, GraphQL is not available). The external material below therefore comes only from **web-search result summaries** of those articles, not from the primary write-up. Treat it as secondhand.
+- Upstream history: a full-history, blobless clone of `bitwarden/clients` (`git -C <bw-history> ...`). Current code: `/home/user/clients` at `5a00c60` (main, shallow; the only later commits in that checkout add study notes and do not touch code).
+- External sources were only partly reachable. `marektoth.com`, `marektoth.cz`, `thehackernews.com`, `bleepingcomputer.com`, `socket.dev`, `securityweek.com`, `heise.de`, `community.bitwarden.com` and `discuss.privacyguides.net` were **blocked by the network proxy**, and GitHub PR pages could not be read (`gh pr view` is blocked, GraphQL is not available). The external material below therefore comes only from **web-search result summaries** of those articles, not from the primary write-up. Treat it as secondhand.
 - No browser was available in the sandbox (no Chrome binary), so **nothing here was tested dynamically**. Where a conclusion depends on browser rendering behaviour, it is marked "untested".
 
 ---
@@ -14,15 +14,16 @@ How this was produced:
 
 ### External facts [external, secondhand via search summaries]
 
-- Researcher Marek Toth presented "DOM-based extension clickjacking" at DEF CON 33 (August 2025). A single click on an attacker-controlled page could leak credit card data, personal data, logins and TOTP codes from password manager autofill UIs. Affected products reportedly included 1Password, iCloud Passwords, Bitwarden, LastPass and others.
+- Researcher Marek Toth presented "DOM-based extension clickjacking" at DEF CON 33 (August 2025). A single click on an attacker-controlled page could leak credit card data, personal data, logins and TOTP codes from password manager autofill UIs. Affected products reportedly included 1Password, Bitwarden, Enpass, iCloud Passwords, LastPass and LogMeOnce, among others.
 - The subtypes reported in the coverage: direct DOM element opacity manipulation, root element opacity manipulation, parent element opacity manipulation, and partial or full overlaying. One summary describes an overlay variant using `pointer-events: none` so clicks pass through to the autofill UI, and a "partial overlay" variant that covers everything except a few pixels of the dropdown and uses "last in DOM with max z-index, or Top Layer" to stay on top.
 - The researcher reportedly notified vendors privately in April 2025.
-- Bitwarden reportedly said a fix was rolling out in browser extension **2025.8.0**. One search-summary snippet claims 2025.8.1 added "do not render the inline autofill menu if the page has an open popover". A forum-style snippet says "not all versions of the vulnerability require manipulation of opacity (see the Overlay section)", and mentions a fix "in version 2025.7.2".
+- Bitwarden reportedly said a fix was rolling out in browser extension **2025.8.0**. One search-summary snippet claims 2025.8.1 added "do not render the inline autofill menu if the page has an open popover". A forum-style snippet says "not all versions of the vulnerability require manipulation of opacity (see the Overlay section)", and mentions a fix "in version 2025.7.2". Another community summary says 2025.8.0 and 2025.8.1 did not fully fix it in users' own tests and only 2025.8.2 did (unverified forum testing, not a vendor statement).
+- I found no CVE identifier for the Bitwarden issue, in the repo or in the search summaries.
 
 ### What the code shows
 
 - Before the fix, 2025.7.0 had strong defenses on the inline menu's own elements (forced inline `!important` styles, mutation observers that wipe tampering, DOM-order enforcement, a basic "is something covering me" check). It had **no check on the `<html>`/`<body>` ancestors**, and the menu's host element is a direct child of `<body>`, so page-set opacity on `html` or `body` visually fades the menu. That is the gap PM-24936 closed.
-- The fix was not one commit. Within about 10 days there were three follow-ups in the same file, and more hardening followed through 2026:
+- The fix was not one commit. Within 10 days (2025-08-18 to 2025-08-28) there were three commits, the opacity check and two follow-ups, and more hardening followed through 2026:
   - PM-24936: opacity check on `html`/`body` (first shipped in browser 2025.8.0).
   - PM-25025: close the menu if any `:popover-open` element exists (first shipped in 2025.8.1).
   - PM-25122: put the menu itself in the top layer (`popover="manual"`) and keep re-asserting its position above other top-layer content (first shipped in 2025.8.2).
@@ -46,19 +47,19 @@ The attacker never needs to read the extension UI. They only need the user's cli
 
 ### 2.2 How Bitwarden injects the inline menu (from the code)
 
-Structure on current main and at 2025.7.0:
+Structure on current main (2025.7.0 had the same nesting, but without `popover="manual"` on the host and without `credentialless` on either iframe):
 
 ```
 <body>
   <random-custom-element popover="manual">   <- "host", created by the content script
     #shadow-root (closed)
-      <iframe src="chrome-extension://.../overlay/menu.html">   <- extension page
-        <iframe sandbox="allow-scripts" credentialless src=".../overlay/list.html">   <- real list/button UI
+      <iframe credentialless src="chrome-extension://.../overlay/menu.html">   <- extension page
+        <iframe sandbox="allow-scripts" credentialless src=".../overlay/menu-list.html">   <- real list UI (menu-button.html for the button)
 ```
 
-- Host element: random custom element name (or a plain `div` on Firefox). `apps/browser/src/autofill/overlay/inline-menu/content/autofill-inline-menu-content.service.ts`, `createButtonElement` / `createListElement` (7.0: lines 217-261; main: lines 327-381). Appended as the last child of `document.body` (or of a modal dialog), see `appendInlineMenuElementToDom`.
+- Host element: random custom element name (or a plain `div` on Firefox). `apps/browser/src/autofill/overlay/inline-menu/content/autofill-inline-menu-content.service.ts`, `createButtonElement` / `createListElement` (7.0: lines 217-261; main: lines 327-381). Appended as the last child of `document.body` (or of a modal `<dialog>`, and on main also an ARIA modal, see section 6), see `appendInlineMenuElementToDom`.
 - Closed shadow root: `element.attachShadow({ mode: "closed" })` in `.../iframe-content/autofill-inline-menu-iframe-element.ts` (7.0 line 11; main line 14).
-- Iframe whose `src` is an extension page: `BrowserApi.getRuntimeURL("overlay/menu.html")` in `.../iframe-content/autofill-inline-menu-iframe.service.ts` (`initMenuIframe`; 7.0 line 84, main line 90). The page it loads, `pages/menu-container/autofill-inline-menu-container.ts`, creates a nested iframe with `sandbox: "allow-scripts"` and `credentialless` for the actual button or list page.
+- Iframe whose `src` is an extension page: `overlay/menu.html` in `.../iframe-content/autofill-inline-menu-iframe.service.ts` (`initMenuIframe`; 7.0 line 84 uses `chrome.runtime.getURL`, main line 90 uses `BrowserApi.getRuntimeURL`). The page it loads, `pages/menu-container/autofill-inline-menu-container.ts`, creates a nested iframe with `sandbox: "allow-scripts"` (already in 7.0) and, since `364e9b3054` (2026.3.0), `credentialless`, for the actual button or list page (`overlay/menu-button.html` / `overlay/menu-list.html`, named in `apps/browser/webpack.base.js`).
 - Content scripts run in an isolated world, so the page's JavaScript cannot call into the extension's objects.
 
 ### 2.3 What the page can and cannot influence
@@ -76,7 +77,7 @@ Structure on current main and at 2025.7.0:
 | Elements painted on top of the menu (higher z-index, later in DOM order, or in the top layer) | Hides or replaces what the user sees |
 | `pointer-events: none` on the overlay | The decoy is visible but clicks fall through to the real menu under it |
 | Partial overlay | Cover all of the menu except a small hole; the user clicks the hole, which is part of a list item |
-| Top layer (Popover API, `<dialog>.showModal()`, fullscreen) | Top-layer elements paint above all normal z-index content, so a page can stack a decoy above the menu if the menu is not in the top layer, or above it if the menu is lower in the top-layer order |
+| Top layer (Popover API, `<dialog>.showModal()`, fullscreen) | Top-layer elements paint above all normal z-index content, and within the top layer the most recently added element paints on top. So a page can put a decoy above the menu: always if the menu is not in the top layer (as in 7.0), or, if it is, by entering the top layer after the menu |
 | Page scripts focusing fields, scrolling, moving fields | Trigger when and where the menu opens |
 | Mouse-following decoys | The attacker moves the decoy so the next click lands on a menu item |
 
@@ -89,7 +90,7 @@ Structure on current main and at 2025.7.0:
 
 ## 3. How the attack maps onto Bitwarden's code
 
-1. **A field gets focus.** Page script calls `field.focus()` or the user clicks. `AutofillOverlayContentService.handleFormFieldFocusEvent` -> `triggerFormFieldFocusedAction` (`apps/browser/src/autofill/services/autofill-overlay-content.service.ts`, main line ~1019) -> background.
+1. **A field gets focus.** Page script calls `field.focus()` or the user clicks. `AutofillOverlayContentService.handleFormFieldFocusEvent` (main line 1019) -> `triggerFormFieldFocusedAction` (main line 1033) in `apps/browser/src/autofill/services/autofill-overlay-content.service.ts` -> background.
 2. **Menu is shown.** Background `openInlineMenuOnEmptyField` (`apps/browser/src/autofill/background/overlay.background.ts`, main ~2487). If the user setting is `AutofillOverlayVisibility.OnFieldFocus` (value 2, `libs/common/src/autofill/constants/index.ts`), both button and list are positioned immediately; otherwise only the button, and the list opens when the button is clicked. The content service then handles `appendAutofillInlineMenuToDom` -> `appendButtonElement` / `appendListElement`.
 3. **User clicks a list item.** In `pages/list/autofill-inline-menu-list.ts` the handler ends in:
 
@@ -105,8 +106,8 @@ private triggerFillCipherClickEvent = (cipher: InlineMenuCipherData, usePasskey:
 };
 ```
 
-4. **Message path.** The nested page posts to its parent, the container page forwards to the background port. `fillAutofillInlineMenuCipher` is in the container's allowlist `ALLOWED_BG_COMMANDS` (`pages/menu-container/autofill-inline-menu-container.ts`, main line 14-31).
-5. **Fill.** Background `fillInlineMenuCipher` (`overlay.background.ts`, main line 1453; 7.0 line 1125):
+4. **Message path.** The nested page posts to its parent, the container page forwards to the background port. On main, `fillAutofillInlineMenuCipher` is in the container's allowlist `ALLOWED_BG_COMMANDS` (`pages/menu-container/autofill-inline-menu-container.ts`, main lines 15-31). That allowlist was added later by `b1acff7f5c` (PM-27900, 2025.12.0); 7.0 did not have it.
+5. **Fill.** Background `fillInlineMenuCipher` (`overlay.background.ts`, main line 1453; 7.0 line 1125). Excerpt from main (7.0 is the same in substance, but assigns the `doAutoFill` result directly to `totpCode`):
 
 ```ts
 if (await this.autofillService.isPasswordRepromptRequired(cipher, tab)) { return; }
@@ -123,11 +124,11 @@ if (totpCode) { this.platformUtilsService.copyToClipboard(totpCode); }
 
 What one click can do (from code):
 
-- **Login**: fills username and password into whatever fields the page declared (`doAutoFill`). With `allowTotpAutofill: true` it also fills a TOTP field and copies the TOTP code to the clipboard.
+- **Login**: fills username and password into whatever fields the page declared (`doAutoFill`). With `allowTotpAutofill: true` it can also fill a TOTP field, and it copies the TOTP code to the clipboard (on main via `getTotpCopyCode`, which requires the auto-copy TOTP setting and premium or organization TOTP access).
 - **Card and identity**: the menu supports `CipherType.Card` and `CipherType.Identity` fill types (`inlineMenuFillType === CipherType.Card` at `autofill-inline-menu-list.ts` 7.0 line 1624; `InlineMenuFillType` in `enums/autofill-overlay.enum.ts`). The same `fillAutofillInlineMenuCipher` command fills them.
-- **Passkey item**: `authenticatePasskeyCredential` (`overlay.background.ts` main 1566) only calls `request.subject.next({ type: Continue, credentialId })` on an **already active** WebAuthn request for that tab. That means the page must have started `navigator.credentials.get`, and the assertion is bound to the page's own origin. My analysis: low value for an attacker, but I did not test it.
-- **Mitigation already present**: items with master password reprompt do not fill on click, they open a reprompt popout (`isPasswordRepromptRequired`, `autofill.service.ts` main ~685).
-- **Where the data goes**: into the page's own inputs, which the attacker can read (or which can be non-visible). Filling is gated by `viewable` checks in `collect-autofill-content.service.ts` (`isElementViewable`), but I did not audit how well that stops off-screen or zero-size field tricks. That is a separate topic.
+- **Passkey item**: `authenticatePasskeyCredential` (`overlay.background.ts` main 1566) only calls `request.subject.next({ type: Continue, credentialId })` on an **already active** WebAuthn request for that tab. That means the page must have started `navigator.credentials.get`, and the assertion is bound to the page's own origin. My analysis: low value for an attacker, but I did not test it. Note that this passkey branch returns **before** the reprompt check below, and it copies the item's TOTP code to the clipboard without the auto-copy setting check (in 7.0 and on main). Whether the FIDO2 flow enforces reprompt elsewhere I did not check.
+- **Mitigation already present**: items with master password reprompt do not fill on click, they open a reprompt popout (`isPasswordRepromptRequired`, `autofill.service.ts` main line 685).
+- **Where the data goes**: into the page's own inputs, which the attacker can read (or which can be non-visible). Filling skips fields whose `viewable` flag is false (`autofill.service.ts`). The flag is set in `collect-autofill-content.service.ts` by `DomElementVisibilityService.isElementViewable` (`services/dom-element-visibility.service.ts`), which checks viewport bounds, CSS (opacity below 0.1 on the field and on its ancestors up to, but not including, `<html>`; `display`, `visibility`, clip) and an `elementFromPoint` check at the field's center. That check is about page **fields**, not the menu. How it interacts with the attack (for example, it never looks at `<html>` opacity, and it runs at collection time) I did not test.
 
 ---
 
@@ -165,11 +166,11 @@ this.updateCustomElementDefaultStyles(element);
 
 So setting `opacity:0` directly on the host element gets reverted. This covers the "direct element opacity" variant.
 
-**c) Same pattern on the inner iframe** (`iframe-content/autofill-inline-menu-iframe.service.ts`, 7.0 lines 26-41, 399-420, 436-455): the iframe gets `visibility: visible`, `clipPath: "none"`, `pointerEvents: "auto"`, `zIndex: 2147483647`, plus `opacity` managed for the fade-in; style and attribute mutations are reverted; more than 10 foreign attribute changes or more than 20 mutation iterations in 2 s force-close the menu (`forceCloseInlineMenu`).
+**c) Same pattern on the inner iframe** (`iframe-content/autofill-inline-menu-iframe.service.ts`, 7.0 lines 26-41, 399-420, 436-455): the iframe gets `visibility: visible`, `clipPath: "none"`, `pointerEvents: "auto"`, `zIndex: 2147483647`, plus `opacity` managed for the fade-in; style and attribute mutations are reverted; the menu is force-closed (`forceCloseInlineMenu`) once 10 foreign attribute changes have been reverted and another arrives, or after more than 20 observer callbacks. Both counters reset only after 2 s without a callback (the reset timer restarts on every callback), so this is "no quiet period of 2 s", not a fixed 2 s window.
 
 **d) Closed shadow root** (`iframe-content/autofill-inline-menu-iframe-element.ts` 7.0 line 11), so the page cannot get at the iframe node.
 
-**e) DOM order enforcement and basic obscuring check** (7.0 lines 384-497). A `childList` observer on the container keeps the button/list as the last children. If some other element keeps forcing itself last (3 times), the service lowers its z-index and, 500 ms later, checks the element at the center of the menu:
+**e) DOM order enforcement and basic obscuring check** (7.0 lines 384-497). A `childList` observer on the container keeps the button/list as the last children. If the same other element has been seen as last child 3 times, the service stops re-ordering, caps that element's **inline** `z-index` at 2147483646 (only if its inline z-index was at least 2147483647), and, 500 ms later, checks the element at the center of the button and of the list:
 
 ```ts
 471 private verifyInlineMenuIsNotObscured = async (lastChild: Element) => {
@@ -182,19 +183,19 @@ So setting `opacity:0` directly on the host element gets reverted. This covers t
 
 **What was missing in 7.0** (verified by reading the whole file and by `git log -S`): nothing looked at `<html>` or `<body>` styles at all. `grep -n "getComputedStyle" ...content.service.ts` at tag 7.0 has no match; the file's only style logic is on the inline-menu elements themselves. Because the host sits directly under `<body>`, `body { opacity: 0 }` or `html { opacity: 0 }` fades the whole menu and no observer notices.
 
-**Earlier related fix (context):** `4d05b008f0` "[PM-5035] Fix autofill overlay clickjacking vulnerability that can be triggered by a malicious extension (#7001)", 2023-12-11, first in browser 2024.1.0. It added the iframe attribute and mutation hardening and the forced-close counters. It targeted a different threat (another extension tampering) but is the origin of the style-reverting pattern.
+**Earlier related fix (context):** `4d05b008f0` "[PM-5035] Fix autofill overlay clickjacking vulnerability that can be triggered by a malicious extension (#7001)", 2023-12-11, first in browser 2024.1.0. It added the iframe attribute-revert logic and the forced-close counters on top of the iframe style-revert observer, which already existed from the overlay MVP (`b622c38c6f`, PM-4229, 2023-11-20, browser 2023.12.0). It targeted a different threat (another extension tampering) but is the origin of the counters and attribute reverting.
 
 ---
 
 ## 5. The fixes, in chronological order
 
-Each fix exists as **two or three commits**: one on `main`, and cherry-picks on release branches (different hashes, same subject, same diff). The table lists all hashes and the first `browser-v*` tag containing each, from `git tag --contains <hash> | grep browser | sort -V | head -1`.
+The first three fixes each exist as **two or three commits**: one on `main`, and cherry-picks on release branches (different hashes, same subject, same diff; I compared the diffs). The table lists all hashes and the first `browser-v*` tag containing each, from `git tag --contains <hash> | grep '^browser-v' | sort -V | head -1`.
 
 | Change | main hash | Release-branch hash(es) | Authored | First browser tag containing it |
 |---|---|---|---|---|
-| PM-24936 opacity | `e942645d44` | `e7059b790d` | 2025-08-18 (rc commit 2025-08-19) | main: 2025.9.0; rc: **2025.8.0** |
-| PM-25025 popover-open | `b87cb2ba24` | `4af4a863be` (in 2025.8.1), `b72dd28aa5` | 2025-08-22 | main: 2025.9.0; rc: **2025.8.1** |
-| PM-25122 top-layer menu | `8aba7757ab` | `f921012080` (in 2025.8.2), `909d5bdf6b` | 2025-08-28 | main: 2025.9.0; rc: **2025.8.2** |
+| PM-24936 opacity | `e942645d44` | `e7059b790d` | 2025-08-18 (rc copy committed 2025-08-19) | main: 2025.9.0; rc: **2025.8.0** |
+| PM-25025 popover-open | `b87cb2ba24` | `4af4a863be` (browser 2025.8.1); `b72dd28aa5` (in no browser tag, only `desktop-v2025.8.1`/`.8.2`) | 2025-08-22 | main: 2025.9.0; rc: **2025.8.1** |
+| PM-25122 top-layer menu | `8aba7757ab` | `f921012080` (browser 2025.8.2); `909d5bdf6b` (in no browser tag, only `desktop-v2025.8.2`) | 2025-08-28 | main: 2025.9.0; rc: **2025.8.2** |
 | Pseudo-element guard | `b0179bd105` | none | 2025-10-07 | 2025.11.0 |
 | PM-27915 pseudo-element 2 | `df03664827` | none | 2025-11-18 | 2025.12.0 |
 | PM-27797 popover attr + backoff | `7c4db701b9` | none | 2025-11-19 | 2025.12.0 |
@@ -208,7 +209,7 @@ Note: the lead commit `e7059b790d` is the **release-branch copy** that shipped i
 
 ### 5.1 PM-24936, `e942645d44` / `e7059b790d`: "Prevent inline menu inheritance of potentially dangerous opacity from host body and above" (#16063)
 
-Files: `.../inline-menu/content/autofill-inline-menu-content.service.ts` (+59/-3) and its `.spec.ts` (+42 lines), 98 insertions and 3 deletions in total.
+Files: `.../inline-menu/content/autofill-inline-menu-content.service.ts` (+57/-2) and its `.spec.ts` (+41/-1), 98 insertions and 3 deletions in total (`git show --numstat`).
 
 Key diff:
 
@@ -256,12 +257,12 @@ Key diff:
 +    if (!this.pageIsOpaque) { return; }
 ```
 
-What it checks: computed `opacity` of `<html>` and `<body>` must both be greater than 0.6. When it checks: after any attribute mutation on `html` or `body` (observers attached the first time an inline-menu element's styles are set), and whenever the menu's container gets a child added or removed (this includes the menu being appended). What it does on failure: `closeInlineMenu()` (removes button and list from the DOM and tells the background), and `processContainerElementMutation` returns before re-ordering.
+What it checks: computed `opacity` of `<html>` and `<body>` must both be greater than 0.6. When it checks: after any attribute mutation on `html` or `body` (observers attached in `observeCustomElements`, which first runs when a menu element is created and gets its default styles), and whenever the container's direct children change while the menu is open (this includes the menu being appended). What it does on failure: `closeInlineMenu()` (removes button and list from the DOM and tells the background), and `processContainerElementMutation` returns before re-ordering.
 
 Observations from the diff:
 - The constructor call to `checkPageOpacity()` runs before any menu element exists, so I believe it has no effect in practice (nothing to close). Untested. PM-25025 removed it.
 - Because the check is driven by observers, it is reactive. There is a window between the menu being appended and the idle-callback check (`requestIdleCallbackPolyfill`, timeout 500 ms). That is my reading of the code, not a demonstrated exploit.
-- Only attribute mutations are watched, so a change made through a stylesheet (not through an attribute on `html`/`body`) is only caught at the next container mutation.
+- Only attribute mutations on `html`/`body` are watched, so a change made through a stylesheet (not through an attribute on `html`/`body`) is only caught at the next container `childList` mutation. Inserting a `<style>` as a direct child of `<body>` is itself such a mutation (when `body` is the container); inserting it into `<head>` is not.
 
 Tests added (spec): "closes the inline menu if the page body is not sufficiently opaque" (body 0), "... html is not sufficiently opaque" (html 0.3), "does not close ... if html and body is sufficiently opaque".
 
@@ -284,11 +285,11 @@ Files: same service + spec (+53/-22 total). Renames `checkPageOpacity` to `check
 +  };
 ```
 
-What it checks: any open popover on the page. On failure: close the menu. This is the "do not render the inline menu if the page has an open popover" behaviour that secondhand coverage attributes to 2025.8.1, and git agrees (4af4a863be is first in 2025.8.1). It is superseded 6 days later by PM-25122 (the `getPageTopLayerInUse` call is removed).
+What it checks: any open popover on the page (`:popover-open`; a modal `<dialog>` does not match it). When: only at the same trigger points as the opacity check (html/body attribute change, container child change), not when a popover opens. On failure: close the menu. This is the "do not render the inline menu if the page has an open popover" behaviour that secondhand coverage attributes to 2025.8.1, and git agrees (4af4a863be is first in 2025.8.1). It is superseded 6 days later by PM-25122 (the `getPageTopLayerInUse` call is removed).
 
 ### 5.3 PM-25122, `8aba7757ab` / `f921012080`: "Top-layer inline menu population" (#16175)
 
-Files (6): `content/autofill-inline-menu-content.service.ts`, abstractions, `services/autofill-overlay-content.service.ts`, `services/collect-autofill-content.service.ts`, specs. The strategy changes from "bail out if the page uses the top layer" to "join the top layer and stay on top".
+Files (6): `content/autofill-inline-menu-content.service.ts` (+93/-15), its spec (17 lines removed), two abstraction files (`inline-menu/abstractions/autofill-inline-menu-content.service.ts`, `services/abstractions/autofill-overlay-content.service.ts`), `services/autofill-overlay-content.service.ts` (+7) and `services/collect-autofill-content.service.ts` (+76). The strategy changes from "bail out if the page uses the top layer" to "join the top layer and stay on top".
 
 The menu elements become manual popovers:
 
@@ -332,11 +333,13 @@ And `collect-autofill-content.service.ts` watches for top-layer candidates (`<di
 +  });
 ```
 
-Also in this commit: html/body observers are moved out of `observeCustomElements()` into a new `observePageAttributes()` called from `setupMutationObserver()` (so they are active from construction), `getPageIsOpaque` now fails closed when `html`/`body` is missing, and `destroy()` unobserves them. A `@TODO` is added: "for definitive checks, traverse up the node tree from the inline menu container; nodes can exist between `html` and `body`".
+Also in this commit: html/body observers are moved out of `observeCustomElements()` into a new `observePageAttributes()` called from `setupMutationObserver()` (so they are active from construction; on main they attach in `startMonitoring()` instead, see section 6), `getPageIsOpaque` now fails closed when `html` or `body` is missing (PM-27797 later changed this, see 5.5), and `destroy()` unobserves them.
+
+On current main the candidate handling has changed shape: `a4439044ac` (2026-07-10, 2026.7.0) queues top-layer candidates found in mutation records (`pendingTopLayerTargets`) and attaches listeners in a later idle callback (two nested `requestIdleCallbackPolyfill` calls, each with a 500 ms timeout), and `3f466c4b4c`/`4ad91a3b46` also call `refreshMenuLayerPosition()` when a listener is set up. A `@TODO` is added: "for definitive checks, traverse up the node tree from the inline menu container; nodes can exist between `html` and `body`".
 
 ### 5.4 Pseudo-element guards, `b0179bd105` then `df03664827` (PM-27915)
 
-First attempt (2025-10-07): a `<style>` node inside the host (light DOM) with `::backdrop { background:none; pointer-events:none }` and `::before, ::after { content:"" }`. The second commit (2025-11-18) moved this into the **closed shadow root**, with a much larger rule set:
+First attempt (2025-10-07): a `<style>` node prepended inside the host (light DOM), only on the custom-element (non-Firefox) path, with `<TAG>::backdrop { background:none !important; pointer-events:none !important }` and `<TAG>::before, <TAG>::after { content:"" !important }`, where `<TAG>` is the host's random tag name. The second commit (2025-11-18) moved this into the **closed shadow root**, with a much larger rule set:
 
 ```css
 :host::backdrop, :host::before, :host::after {
@@ -351,11 +354,11 @@ First attempt (2025-10-07): a `<style>` node inside the host (light DOM) with `:
 }
 ```
 
-File: `iframe-content/autofill-inline-menu-iframe-element.ts` (main lines 34-71). Reason: once the host is a popover, its `::backdrop` pseudo-element is styleable by page rules (for example a full-screen decoy backdrop), and `::before`/`::after` on the host are drawn by the page's CSS. The commit messages only say "prevent pseudo-elements from being targeted and styled by host page's global rules"; the attack scenario is my inference.
+File: `iframe-content/autofill-inline-menu-iframe-element.ts` (main lines 34-71; the full rule set also forces `display: none`, `pointer-events: all`, `isolation: isolate` and resets position and background properties). Reason: once the host is a popover, its `::backdrop` pseudo-element is styleable by page rules (for example a full-screen decoy backdrop), and `::before`/`::after` on the host are drawn by the page's CSS. The commit messages only say "prevent pseudo-elements from being targeted and styled by host page's global rules"; the attack scenario is my inference.
 
 ### 5.5 PM-27797, `7c4db701b9`: "Prevent host page manipulation of inline menu popover attribute" (#17400), 2025-11-19
 
-Files: content service (+138 lines changed), spec (+490 lines), `_locales/en/messages.json`. Adds a fail-safe against pages that fight for the top of the top layer:
+Files: content service (+122/-16), spec (+486/-4), `_locales/en/messages.json` (+3). Adds a fail-safe against pages that fight for the top of the top layer:
 
 ```ts
 const experienceValidationBackoffThresholds = {
@@ -383,16 +386,16 @@ if (record.attributeName === "popover" && this.inlineMenuEnabled) {
 
 Message text (`_locales/en/messages.json`): "This page is interfering with the Bitwarden experience. The Bitwarden inline menu has been temporarily disabled as a safety measure."
 
-What it checks: how often the menu has had to be re-promoted (top-layer refreshes, or the page rewriting the `popover` attribute) within 5 s. On failure: permanently (until reload) disables creation and appending of menu elements (`if (!this.inlineMenuEnabled) return;` guards were added to `appendInlineMenuElements`, `appendButtonElement`, `appendListElement`, `createButtonElement`, `createListElement`), closes the menu, and shows a page `alert()`.
+What it checks: how often the menu has had to be re-promoted (top-layer refreshes, or the page rewriting the `popover` attribute). The window is fixed, not sliding: it starts at the last reset, and a refresh more than 5 s after that resets the count to 0. Inside the window the count increments while it is `<= countLimit`, so the kill switch fires on the 7th top-layer refresh (count already 6 > 5), or the 12th `popover` rewrite. On failure: disables the menu for the life of the content script (nothing sets `inlineMenuEnabled` back to `true`, so in practice until the page reloads), closes the menu, and shows a page `alert()`. The commit added `if (!this.inlineMenuEnabled) return;` guards to `appendInlineMenuElements`, `appendButtonElement`, `appendListElement`, `createButtonElement` and `createListElement`; `c6f704bd21` (PM-29518, 2026-01-09) removed the last four as redundant, so on main only `appendInlineMenuElements` (line 220) keeps it.
 
-It also rewrote `getPageIsOpaque` to use `document.querySelectorAll("html, body")` and require **every** match to have opacity above 0.6 (covers duplicate `html`/`body` nodes in non-standard documents).
+It also rewrote `getPageIsOpaque` to use `document.querySelectorAll("html, body")` and require **every** match to have opacity above 0.6 (covers duplicate `html`/`body` nodes in non-standard documents). It returns `false` only if there are no matches at all, so a missing `body` alone no longer fails closed.
 
 ### 5.6 Supporting hardening in the same period (related, but I cannot tie them to this specific disclosure from git)
 
 - `f17890a26b` PM-27798 (2025.12.1): iframe service `updateIframePosition` now calls `isElementCompletelyWithinViewport(this.iframe.getBoundingClientRect())` and `forceCloseInlineMenu()` if any edge is outside the (visual) viewport (`autofill-inline-menu-iframe.service.ts`, main 283-343).
-- `11e2b25ede` PM-28831 (2026.2.0): `utils/event-security.ts` adds `EventSecurity.isEventTrusted(event)` (`return event.isTrusted`), and every click and key handler in the list page, page-element base class and Lit components rejects untrusted (script-dispatched) events. This blocks synthetic `click()`/`dispatchEvent` against the menu; it does **not** stop a real user click that was tricked (a real click is `isTrusted === true`).
-- `b1acff7f5c` (PM-27900, 2025.12.0) and `3de3bee08f` (PM-27821, 2025.12.0): extension-frame validation, extension-origin checks on every `postMessage`, a per-session 32-character token between the container page and its iframe. These protect the messaging channel, not the visual layer.
-- `364e9b3054` (2026.3.0): adds the `credentialless` attribute to injected iframes (main: `defaultIframeAttributes` in the iframe service and container). Isolation hardening, not a clickjacking defense.
+- `11e2b25ede` PM-28831 (2026.2.0): `utils/event-security.ts` adds `EventSecurity.isEventTrusted(event)` (`return event.isTrusted`), and click and key handlers in the list page, the page-element base class, the Lit notification components, and page-side handlers (`autofill-overlay-content.service.ts`, `content-message-handler.ts`, `context-menu-handler.ts`) reject untrusted (script-dispatched) events. Inside the menu's own pages this is defence in depth, because page script cannot reach into the cross-origin extension iframe anyway. It does **not** stop a real user click that was tricked (a real click is `isTrusted === true`).
+- `b1acff7f5c` (PM-27900, 2025.12.0) and `3de3bee08f` (PM-27821, 2025.12.0): extension-frame validation, the container's `ALLOWED_BG_COMMANDS` allowlist and a per-session 32-character token between the container page and its iframe (both from `b1acff7f5c`), and extension-origin checks on `postMessage` (`3de3bee08f`). These protect the messaging channel, not the visual layer.
+- `364e9b3054` (2026.3.0): adds the `credentialless` attribute to injected iframes (main: `defaultIframeAttributes` in the inline-menu iframe service and container, and the notification bar iframe). Isolation hardening, not a clickjacking defense.
 - `3f466c4b4c` (2026.1.0) and `4ad91a3b46` (2026.9.0): refresh the menu position as soon as a top-layer candidate listener is set up; de-duplicate `toggle` listeners with a `WeakSet`. The latter's message notes that `toggle` events on dialogs do not exist before Chrome 134 / Firefox 136, so the refresh runs on every observation as a safety net.
 - `6f3d3239c2` PM-35399 (2026.5.0), a performance change that **narrowed** the opacity monitoring, see section 7.
 
@@ -414,16 +417,16 @@ All in `apps/browser/src/autofill/overlay/inline-menu/content/autofill-inline-me
 | Re-promote menu above other top-layer content | `refreshTopLayerPosition` lines 636-668; `getUnownedTopLayerItems` lines 582-596 |
 | Backoff and kill switch with `alert()` | `experienceValidationBackoffThresholds` lines 23-32, `checkAndUpdateRefreshCount` lines 602-628 |
 | Last-child override + `elementFromPoint` obscure check | lines 726-736, 768-814 |
-| Excessive mutation circuit breaker (> 100 in 2 s) | `isTriggeringExcessiveMutationObserverIterations` lines 832-852 |
-| Observe lifecycle | `startMonitoring()` / `stopMonitoring()` lines 102-130 (autofill lifecycle work, PM-37555) |
+| Excessive mutation circuit breaker (more than 100 observer callbacks with no 2 s quiet gap) | `isTriggeringExcessiveMutationObserverIterations` lines 832-852 |
+| Observe lifecycle | `startMonitoring()` / `stopMonitoring()` lines 102-130 (`f6e3374908`, PM-37555, 2026-06-24, 2026.7.0). The html/body observers now attach in `startMonitoring()` (called from `autofill-init.ts`), not in the constructor |
 
 Other files:
 - `.../iframe-content/autofill-inline-menu-iframe-element.ts` lines 13-71: closed shadow root plus pseudo-element reset stylesheet.
 - `.../iframe-content/autofill-inline-menu-iframe.service.ts` lines 30-53 (iframe forced styles, `credentialless`), 283-343 (viewport check), and its own mutation observer.
-- `apps/browser/src/autofill/services/collect-autofill-content.service.ts` lines 1486-1492 (`setupInitialTopLayerListeners`), 1741-1765 (`setupTopLayerCandidateListener`), 1772+ (`shouldListenToTopLayerCandidate`).
+- `apps/browser/src/autofill/services/collect-autofill-content.service.ts` lines 1486-1496 (`setupInitialTopLayerListeners`), 1741-1765 (`setupTopLayerCandidateListener`), 1772+ (`shouldListenToTopLayerCandidate`).
 - `apps/browser/src/autofill/utils/event-security.ts`: `isEventTrusted`.
 
-Container choice changed after the fix: `getInlineMenuContainerElement` (lines 303-321) returns a `<dialog>` that is `:modal`, **or an ARIA modal element** (`[role="dialog"][aria-modal="true"]`, added by PM-26503, `7cf20064b4`, 2026-07-30, browser 2026.8.0), otherwise `document.body`. See 7.5 for why this matters.
+Container choice changed after the fix: `getInlineMenuContainerElement` (lines 303-321) returns the focused field's ancestor `<dialog>` if it is open and `:modal` (since `32d12b3d6a`, PM-7980, browser 2024.11.0, so already in 7.0), **or an ARIA modal ancestor** (`[role="dialog"][aria-modal="true"]` or `[role="alertdialog"][aria-modal="true"]`, added by PM-26503, `7cf20064b4`, 2026-07-30, browser 2026.8.0), otherwise `document.body`. See 7.5 for why this matters.
 
 ---
 
@@ -438,10 +441,11 @@ grep -rn -e "<pattern>" overlay/inline-menu --include=*.ts | grep -v "\.spec\.ts
 Patterns run: `checkVisibility`, `elementsFromPoint`, `elementFromPoint`, `IntersectionObserver`, `visibilitychange`, `getComputedStyle`, `pointer-events|pointerEvents`, `clip-path|clipPath`, `\bmask\b|mask-image`, `scale(`, `\bfilter:|filter(`, `contentVisibility|content-visibility`, `z-index|zIndex`, `isTrusted`. Plus, for the whole autofill tree: `fullscreen|requestFullscreen|showModal`.
 
 Results that matter:
-- `checkVisibility`, `elementsFromPoint`, `IntersectionObserver`, `visibilitychange`, `mask`, `scale(`, `content-visibility`, `fullscreen`, `requestFullscreen`, `showModal`: **no matches** (non-spec).
+- `checkVisibility`, `elementsFromPoint`, `IntersectionObserver`, `visibilitychange`, `mask`, `scale(`, `content-visibility`, `isTrusted` (the code uses `EventSecurity.isEventTrusted` instead): **no matches** in `overlay/inline-menu` (non-spec). `fullscreen`, `requestFullscreen`, `showModal`: no matches in the whole autofill tree, nor in `libs/`.
+- Outside `overlay/inline-menu` (wider grep of `apps/browser/src/autofill` and `libs/`): `getComputedStyle`, `elementFromPoint` and `IntersectionObserver` are used, but for page **form fields** (`dom-element-visibility.service.ts`, field positioning in `autofill-overlay-content.service.ts`, `collect-autofill-content.service.ts`), not for the menu. The only `visibilitychange` listener (`autofill-overlay-content.service.ts` line 1753) force-closes the menu when the tab becomes hidden; it does not re-check opacity. `libs/` has no autofill-menu checks.
 - `elementFromPoint`: exactly one use, `autofill-inline-menu-content.service.ts:810`.
 - `getComputedStyle`: exactly one real use, `:692`, reading **only `.opacity`**.
-- `pointerEvents`/`clipPath`: only as values the extension **sets** on its own iframes (`iframe.service.ts:40`, `container.ts:55-56`), never as page checks.
+- `pointerEvents`/`clipPath`: only as values the extension **sets** on its own elements (`iframe.service.ts:39-40` and `container.ts:55-56` on iframes, `iframe.service.ts:126` on the hidden ARIA alert, and `pointer-events: all` in the pseudo-element reset stylesheet), never as page checks.
 - `filter`: only in the pseudo-element reset stylesheet.
 - `checkPageRisks` has three callers: the html/body mutation handler, `processContainerElementMutation`, and the kill-switch path (verified with `grep -rn checkPageRisks`).
 
@@ -458,10 +462,10 @@ Everything below is **analysis from reading code; none of it was exploited or te
 | Overlay on top using z-index/DOM order | Largely yes | Menu is last-child (observer re-orders), z-index at the max, a persistent competing last child is z-index capped and, if it sits at the menu center, the menu closes. Structurally strengthened by being in the top layer |
 | Overlay with `pointer-events: none` over the menu | **Weak in the legacy check** | `elementFromPoint` ignores `pointer-events: none` elements, so the "is something covering me" check cannot see such an overlay. What protects here is the top layer: a non-top-layer decoy cannot paint above a top-layer menu (general platform behaviour, untested here) |
 | Partial overlay leaving a hole | **Not detected by that check** | The legacy check samples **one point** (the center) and only compares it to the container's `lastChild`. A decoy that leaves the center uncovered, or is not the last child, passes |
-| Another top-layer element (popover, `<dialog>.showModal()`) above the menu | Yes (best-effort) | Re-promotion on `toggle`, with a 100 ms delay, plus a per-5 s backoff kill switch. Gaps: top-layer items that do not emit `toggle` (the repo's own commit message says dialogs lack `toggle` before Chrome 134 / Firefox 136, with a refresh on every observation as the fallback); the 100 ms window; **fullscreen** elements (no code references `requestFullscreen`/`fullscreen`; browsers usually require a user gesture for it) |
+| Another top-layer element (popover, `<dialog>.showModal()`) above the menu | Yes (best-effort) | Re-promotion on `toggle`, with a 100 ms delay, plus a 5 s backoff kill switch. Gaps: top-layer items that do not emit `toggle` (the repo's own commit message says `toggle` is missing before Chrome 134 / Firefox 136, with a refresh whenever a candidate is observed as the fallback); the 100 ms window; candidates found by mutation are only wired up in a later idle callback; **fullscreen** elements (no code references `requestFullscreen`/`fullscreen`, so nothing triggers a refresh on `fullscreenchange`; the HTML spec says `:modal` also matches a fullscreen element, so a refresh that runs for another reason would count it, untested; browsers usually require a user gesture for fullscreen) |
 | Page rewrites `popover` attribute | Yes | PM-27797 |
 | `::backdrop`, `::before`, `::after` of host | Yes | Reset stylesheet inside closed shadow root |
-| Page calls `.click()`/`dispatchEvent` | Yes | `isTrusted` checks (PM-28831) |
+| Page calls `.click()`/`dispatchEvent` | Yes | Page script cannot reach the menu's controls (cross-origin iframe in a closed shadow root); `isTrusted` checks (PM-28831) add defence in depth there and on page-side handlers |
 | Menu outside viewport | Yes | PM-27798 |
 | Notification bar (save/update prompt) | **No equivalent defenses** | See 7.6 |
 | Passkey prompts | Different UI path | See 7.7 |
@@ -479,8 +483,8 @@ Everything below is **analysis from reading code; none of it was exploited or te
 const attributeFilter = ["style", "hidden", "popover", "width", "height"];
 ```
 
-   The stated reason is performance (`getComputedStyle` forces layout). The consequence is that a change of `class`, `id`, `data-*`, `lang`, etc. on `html`/`body` (which can flip opacity through a stylesheet rule) no longer triggers a re-check, nor does inserting or modifying a `<style>`/`<link>`, a media-query flip, a `:hover`/`:has()` rule, or a **CSS animation or transition on opacity**. The code itself acknowledges this: "indirect uses of attributes" are not monitored.
-4. **Checks happen at discrete times** (html/body attribute change, container child change), not continuously. There is no timer, no `visibilitychange`, no `IntersectionObserver`, no re-check on the click path. So an attacker who changes opacity after the post-append check through a non-observed route would not be caught in the code I read.
+   The stated reason is performance (`getComputedStyle` forces layout). The consequence is that a change of `class`, `id`, `data-*`, `lang`, etc. on `html`/`body` (which can flip opacity through a stylesheet rule) no longer triggers a re-check. The code itself acknowledges this: "indirect uses of attributes" are not monitored. Separately, and since the first fix (not because of this narrowing), the attribute observers never saw stylesheet edits in `<head>`, media-query flips, `:hover`/`:has()` rules, or a **CSS animation or transition on opacity**; those are only caught if a container child change happens to trigger a check afterwards.
+4. **Checks happen at discrete times** (html/body attribute change, container child change), not continuously. There is no timer, no `IntersectionObserver` on the menu, and no re-check on the click path (the one `visibilitychange` listener only closes the menu when the tab is hidden). So an attacker who changes opacity after the post-append check through a non-observed route would not be caught in the code I read.
 
 ### 7.3 The legacy "obscured" check is narrow
 
@@ -488,7 +492,7 @@ const attributeFilter = ["style", "hidden", "popover", "width", "height"];
 
 ### 7.4 Top-layer defenses are race-prone by design
 
-The menu "wins" by being the most recent `showPopover()`. Re-promotion is event-driven with a 100 ms delay (`setTimeout(..., 100)`), and after more than 5 refreshes in 5 s it gives up and disables the menu (an availability trade-off: a hostile page can turn the inline menu off, which the `alert()` makes visible). During the delay a decoy could sit above the menu. The comment says the delay is "faster than a user's reaction", which is a probabilistic argument.
+The menu "wins" by being the most recent `showPopover()`. Re-promotion is event-driven with a 100 ms delay (`setTimeout(..., 100)`), and on the 7th top-layer refresh inside a 5 s window it gives up and disables the menu (see 5.5; an availability trade-off: a hostile page can turn the inline menu off, which the `alert()` makes visible). During the delay a decoy could sit above the menu. The comment says the delay is "faster than a user's reaction", which is a probabilistic argument. On main there is a second, longer window for elements inserted after page load: their `toggle` listener is only attached in an idle callback after the mutation is drained (section 5.3), so a candidate inserted and opened at once is only handled when that callback runs (my reading, untested).
 
 ### 7.5 Container selection (post-fix change)
 
@@ -497,7 +501,7 @@ The menu "wins" by being the most recent `showPopover()`. Re-promotion is event-
 ### 7.6 Notification bar (`overlay/notifications`)
 
 `apps/browser/src/autofill/overlay/notifications/content/overlay-notifications-content.service.ts`:
-- Host element has a **fixed tag name**, `bit-notification-bar-root` (line 252), closed shadow root (line 256), appended to `document.body` (line 182).
+- Host element has a **fixed tag name**, `bit-notification-bar-root` (lines 252-254), closed shadow root (line 256), appended to `document.body` (line 182). The shadow root is recent: `1da4fd2261` (PM-26985, 2025-10-24, 2025.11.0) added it to address Firefox fingerprinting, not clickjacking. In 2025.7.0 the bar's `div` and iframe were plain light-DOM elements.
 - Styles are applied to the inner `div` and iframe, not to the host. I found no host-style forcing, no `popover`, no MutationObserver, no `getComputedStyle`, no `elementFromPoint` in this file. `git log -S"getComputedStyle"` over `overlay/notifications` and `notification/` returned no commits; the `opacity` hits in history are animation-related (`a966e75576`, `7ce8d06315`, `5b4e4d8f1a`).
 - The `isTrusted` rework (PM-28831) did cover the Lit notification components.
 - Impact is lower by design: the bar's actions (`bgSaveCipher`, `bgOpenChangePasswordUrl`, `bgOpenAddEditVaultItemPopout`, `bgOpenViewVaultItemPopout`, `bgCloseNotificationBar`, `bgOpenAtRiskPasswords` in `notification/bar.ts`) do not fill page fields with vault secrets. A hijacked click could still save or edit data or open a popout. I did not audit each action for harm.
@@ -508,7 +512,7 @@ The inline-menu passkey path only resumes an already pending WebAuthn request fo
 
 ### 7.8 Bottom line
 
-The statement "the fix may be partial" is **fair**, with a more precise framing. The first shipped fix (2025.8.0) covered the root/parent opacity variant only. The overlay and top-layer variants were added across 2025.8.1, 2025.8.2 and 2025.12.0, and the structural change (top-layer menu) is a stronger defense than checks. Remaining theoretical gaps from the code: compositing effects other than opacity, opacity changes through non-observed routes after the 2026 narrowing, partial/`pointer-events` overlays against the legacy check (if the menu were not in the top layer), top-layer races, and the notification bar having no equivalent protection. None of these has been shown to be exploitable here.
+The statement "the fix may be partial" is **fair**, with a more precise framing. The first shipped fix (2025.8.0) covered the root/parent opacity variant only. Defenses against the overlay and top-layer variants were added across 2025.8.1, 2025.8.2 and 2025.12.0, and the structural change (top-layer menu) is a stronger defense than checks. Remaining theoretical gaps from the code: compositing effects other than opacity, opacity changes through non-observed routes after the 2026 narrowing, partial/`pointer-events` overlays against the legacy check (if the menu were not in the top layer), top-layer races, and the notification bar having no equivalent protection. None of these has been shown to be exploitable here.
 
 ---
 
@@ -516,11 +520,11 @@ The statement "the fix may be partial" is **fair**, with a more precise framing.
 
 1. **The core idea:** extension UI that lives inside the attacker's page is subject to the attacker's CSS. Encapsulation (closed shadow root, cross-origin iframe, isolated world) protects **confidentiality of the contents**, not **integrity of presentation**. Opacity on an ancestor is the cleanest example because compositing effects flow down regardless of encapsulation.
 2. **What was already good in 7.0:** `all: initial` + inline `!important` styles, mutation observers that undo tampering, an excessive-mutation circuit breaker, DOM order enforcement. The gap was one level up: `html`/`body`. Commit `e7059b790d` (main copy `e942645d44`, PM-24936) fixed it in browser 2025.8.0.
-3. **Defense in depth over a single patch:** within about two weeks and three releases (2025.8.0, .1, .2) the team went from "close if opacity is low" (PM-24936), to "close if a popover is open" (PM-25025), to "put the menu in the top layer and keep re-promoting it" (PM-25122). That is a good example of replacing a blocklist check with a structural fix.
-4. **Fail-safe vs usability:** the backoff in PM-27797 turns the feature off (with an `alert()`) if the page fights back. Be ready to discuss the trade-off: a hostile page can deny the feature, but it cannot trick a click.
+3. **Defense in depth over a single patch:** within 10 days and three releases (2025.8.0, .1, .2) the team went from "close if opacity is low" (PM-24936), to "close if a popover is open" (PM-25025), to "put the menu in the top layer and keep re-promoting it" (PM-25122). That is a good example of replacing a blocklist check with a structural fix.
+4. **Fail-safe vs usability:** the backoff in PM-27797 turns the feature off (with an `alert()`) if the page fights back. Be ready to discuss the trade-off: a hostile page can deny the feature, and in exchange a page that keeps fighting for the top of the top layer loses the menu instead of winning the race. It does not prove a click cannot be tricked (see 7.4).
 5. **Detect, don't just reset:** opacity is not a property the extension can force on an ancestor, so the only options are to detect and close, or to move out of the ancestor's rendering scope (top layer). Know why `getComputedStyle` is used, and why it was later throttled (performance, PM-35399) and what that cost in coverage.
 6. **`isTrusted` is not a clickjacking fix:** it stops script-driven clicks, but a clickjacked click is a genuine user event. Good to show you know the difference (PM-28831).
-7. **Blast radius controls:** master-password reprompt items do not fill on click, passkey path needs an active request, and fills go through a background allowlist of commands with a per-session token. Also `credentialless` and the `sandbox` attribute on the nested iframe.
+7. **Blast radius controls:** master-password reprompt items do not fill on click (the passkey branch returns before that check), the passkey path needs an active request, and since 2025.12.0 messages from the menu page go through the container page's command allowlist and a per-session token. Also the `sandbox` attribute on the nested iframe (already in 7.0) and `credentialless` (2026.3.0).
 8. **Be honest about limits:** compositing effects other than opacity are not checked, the opacity threshold is 0.6, the notification bar has no equivalent defenses, and I did not dynamically test any of this. Offer how you would test: a local page with `html{filter:opacity(0)}`, `body{transform:scale(0)}`, a `pointer-events:none` decoy, and a CSS-animated opacity, loaded with the extension in a dev profile.
 9. **Process point:** one fix produced several commits (main plus release-branch cherry-picks with different hashes). Always check which hash is in which tag.
 
